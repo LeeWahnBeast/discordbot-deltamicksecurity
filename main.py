@@ -2,10 +2,12 @@ import os
 import re
 import json
 import time
+import unicodedata
 import datetime
 from collections import defaultdict, deque
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from keep_alive import keep_alive
@@ -67,6 +69,37 @@ SCAM_PATTERN = re.compile(
 )
 URL_RE = re.compile(r"https?://([^\s/]+)", re.IGNORECASE)
 
+# --- chuẩn hóa text để bắt né luật (cách chữ, số thay chữ, dấu, lặp chữ) ---
+LEET_MAP = str.maketrans({
+    "4": "a", "@": "a", "3": "e", "1": "i", "!": "i", "|": "i",
+    "0": "o", "5": "s", "$": "s", "7": "t", "+": "t", "8": "b",
+    "9": "g",
+})
+VN_MAP = str.maketrans({"đ": "d", "Đ": "d"})
+
+
+def normalize(text: str) -> str:
+    text = text.lower()
+    text = text.translate(VN_MAP)
+    # bỏ dấu tiếng Việt: ế -> e, ầ -> a, ...
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = text.translate(LEET_MAP)
+    # bỏ mọi ký tự không phải chữ/số (khoảng trắng, dấu chấm, *, _, ...)
+    text = re.sub(r"[^a-z0-9]", "", text)
+    # gộp ký tự lặp liên tiếp: "dmmmm" -> "dm", "vcllll" -> "vcl"
+    text = re.sub(r"(.)\1+", r"\1", text)
+    return text
+
+
+def contains_badword(content: str, badwords: list[str]) -> str | None:
+    norm_content = normalize(content)
+    for w in badwords:
+        norm_word = normalize(w)
+        if norm_word and norm_word in norm_content:
+            return w
+    return None
+
 
 def is_protected(member: discord.Member) -> bool:
     if member.id in OWNER_IDS:
@@ -92,6 +125,11 @@ async def log(guild: discord.Guild, text: str, color=discord.Color.blurple()):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Đã sync {len(synced)} slash command(s)")
+    except Exception as e:
+        print(f"Sync lỗi: {e}")
 
 
 # --- Anti-raid: theo dõi tốc độ join -----------------------------------
@@ -187,14 +225,13 @@ async def on_message(message: discord.Message):
 
         # anti-badword
         if s["badwords"]:
-            content_lower = message.content.lower()
-            if any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", content_lower) for w in s["badwords"]):
+            hit_word = contains_badword(message.content, s["badwords"])
+            if hit_word:
                 try:
                     await message.delete()
                 except discord.HTTPException:
                     pass
-                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm của {member.mention}", discord.Color.gold())
-                await bot.process_commands(message)
+                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{hit_word}`) của {member.mention}", discord.Color.gold())
                 return
 
         # anti-scam
@@ -221,7 +258,6 @@ async def on_message(message: discord.Message):
             except discord.HTTPException:
                 pass
             await log(message.guild, f"🎣 Chặn link scam (`{hit}`) từ {member.mention}", discord.Color.dark_gold())
-            await bot.process_commands(message)
             return
 
         # anti-spam
@@ -248,59 +284,90 @@ async def on_message(message: discord.Message):
             await log(message.guild, f"⏱️ {member.mention} bị timeout vì spam ({len(msgs)} tin)", discord.Color.orange())
             return
 
-    await bot.process_commands(message)
+
 
 
 # ---------------------------------------------------------------- commands -
-def admin_check():
-    async def predicate(ctx):
-        return ctx.author.guild_permissions.administrator
-    return commands.check(predicate)
+def admin_only():
+    return app_commands.checks.has_permissions(administrator=True)
 
 
-@bot.command(name="setlog")
-@admin_check()
-async def setlog(ctx, channel: discord.TextChannel):
-    s = cfg(ctx.guild.id)
+@bot.tree.command(name="setlog", description="Đặt kênh nhận log cảnh báo bảo mật")
+@admin_only()
+async def setlog(interaction: discord.Interaction, channel: discord.TextChannel):
+    s = cfg(interaction.guild.id)
     s["log_channel_id"] = channel.id
     save()
-    await ctx.send(f"✅ Đã đặt kênh log: {channel.mention}")
+    await interaction.response.send_message(f"✅ Đã đặt kênh log: {channel.mention}", ephemeral=True)
 
 
-@bot.command(name="addword")
-@admin_check()
-async def addword(ctx, *, word: str):
-    s = cfg(ctx.guild.id)
+@bot.tree.command(name="addword", description="Thêm từ vào danh sách cấm")
+@admin_only()
+async def addword(interaction: discord.Interaction, word: str):
+    s = cfg(interaction.guild.id)
     if word.lower() not in s["badwords"]:
         s["badwords"].append(word.lower())
         save()
-    await ctx.send(f"✅ Đã thêm từ cấm: `{word}`")
+    await interaction.response.send_message(f"✅ Đã thêm từ cấm: `{word}`", ephemeral=True)
 
-@bot.command(name="removeword")
-@admin_check()
-async def removeword(ctx, *, word: str):
-    s = cfg(ctx.guild.id)
+
+@bot.tree.command(name="removeword", description="Xóa từ khỏi danh sách cấm")
+@admin_only()
+async def removeword(interaction: discord.Interaction, word: str):
+    s = cfg(interaction.guild.id)
     s["badwords"] = [w for w in s["badwords"] if w != word.lower()]
     save()
-    await ctx.send(f"✅ Đã xóa từ cấm: `{word}`")
+    await interaction.response.send_message(f"✅ Đã xóa từ cấm: `{word}`", ephemeral=True)
 
 
-@bot.command(name="addscam")
-@admin_check()
-async def addscam(ctx, domain: str):
-    s = cfg(ctx.guild.id)
+@bot.tree.command(name="listwords", description="Xem danh sách từ cấm")
+@admin_only()
+async def listwords(interaction: discord.Interaction):
+    s = cfg(interaction.guild.id)
+    if not s["badwords"]:
+        await interaction.response.send_message("Chưa có từ cấm nào.", ephemeral=True)
+        return
+    text = ", ".join(f"`{w}`" for w in s["badwords"])
+    await interaction.response.send_message(f"**Danh sách từ cấm ({len(s['badwords'])}):**\n{text}", ephemeral=True)
+
+
+@bot.tree.command(name="addscam", description="Thêm domain vào blocklist link scam")
+@admin_only()
+async def addscam(interaction: discord.Interaction, domain: str):
+    s = cfg(interaction.guild.id)
     domain = domain.lower().strip()
     if domain not in s["scam_domains"]:
         s["scam_domains"].append(domain)
         save()
-    await ctx.send(f"✅ Đã thêm domain scam: `{domain}`")
+    await interaction.response.send_message(f"✅ Đã thêm domain scam: `{domain}`", ephemeral=True)
 
 
-@bot.command(name="status")
-@admin_check()
-async def status(ctx):
-    s = cfg(ctx.guild.id)
-    log_ch = ctx.guild.get_channel(s["log_channel_id"]) if s["log_channel_id"] else None
+@bot.tree.command(name="removescam", description="Xóa domain khỏi blocklist link scam")
+@admin_only()
+async def removescam(interaction: discord.Interaction, domain: str):
+    s = cfg(interaction.guild.id)
+    domain = domain.lower().strip()
+    s["scam_domains"] = [d for d in s["scam_domains"] if d != domain]
+    save()
+    await interaction.response.send_message(f"✅ Đã xóa domain: `{domain}`", ephemeral=True)
+
+
+@bot.tree.command(name="listscam", description="Xem danh sách domain scam")
+@admin_only()
+async def listscam(interaction: discord.Interaction):
+    s = cfg(interaction.guild.id)
+    if not s["scam_domains"]:
+        await interaction.response.send_message("Chưa có domain scam nào.", ephemeral=True)
+        return
+    text = ", ".join(f"`{d}`" for d in s["scam_domains"])
+    await interaction.response.send_message(f"**Danh sách domain scam ({len(s['scam_domains'])}):**\n{text}", ephemeral=True)
+
+
+@bot.tree.command(name="status", description="Xem cấu hình bảo mật hiện tại")
+@admin_only()
+async def status(interaction: discord.Interaction):
+    s = cfg(interaction.guild.id)
+    log_ch = interaction.guild.get_channel(s["log_channel_id"]) if s["log_channel_id"] else None
     embed = discord.Embed(title="Security status", color=discord.Color.blurple())
     embed.add_field(name="Log channel", value=log_ch.mention if log_ch else "chưa đặt", inline=False)
     embed.add_field(name="Raid", value=f"{s['raid_join_threshold']} joins / {s['raid_join_window']}s", inline=False)
@@ -308,7 +375,7 @@ async def status(ctx):
     embed.add_field(name="Spam", value=f"{s['spam_msg_threshold']} msgs / {s['spam_msg_window']}s", inline=False)
     embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
     embed.add_field(name="Scam domains", value=str(len(s["scam_domains"])), inline=True)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------- run ------

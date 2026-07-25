@@ -41,6 +41,9 @@ DEFAULTS = {
     "slow_spam_duplicate_threshold": 4,   # số tin GIỐNG NHAU...
     "slow_spam_window": 120,              # ...trong X giây thì coi là spam CHẬM (vd bot rải tin cách nhau 10-30s)
     "slow_spam_timeout_seconds": 600,
+    "raid_channel_spam_threshold": 5,     # số KÊNH KHÁC NHAU nhận cùng 1 nội dung...
+    "raid_channel_spam_window": 10,       # ...trong X giây thì coi là raid cross-channel
+    "raid_softban_delete_seconds": 3600,  # softban sẽ xóa tin nhắn của người đó trong X giây gần nhất (tối đa 604800 = 7 ngày)
     "badwords": [],
     "scam_domains": [],
     "blocked_bot_ids": [],           # ID bot bị chặn cứng, ban ngay khi join
@@ -202,6 +205,21 @@ async def safe_action(coro, *, action_name: str, guild_id: int | None = None):
     except discord.HTTPException:
         logger.exception("Lỗi HTTP khi thực hiện '%s' (guild=%s)", action_name, guild_id)
     return None
+
+
+async def softban(guild: discord.Guild, user: discord.abc.Snowflake, reason: str, delete_seconds: int = 3600):
+    """Ban rồi unban ngay để xóa hàng loạt tin nhắn gần đây của người đó, không cấm vĩnh viễn."""
+    banned = await safe_action(
+        guild.ban(user, reason=reason, delete_message_seconds=delete_seconds),
+        action_name="softban (ban step)",
+        guild_id=guild.id,
+    )
+    await safe_action(
+        guild.unban(user, reason="Softban: gỡ ban sau khi đã xóa tin nhắn"),
+        action_name="softban (unban step)",
+        guild_id=guild.id,
+    )
+    return banned is not None
 
 
 # ---------------------------------------------------------------- events ---
@@ -427,6 +445,9 @@ async def bulk_delete_messages(guild: discord.Guild, msgs: list[discord.Message]
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
+    # Chỉ theo dõi kênh văn bản (Text Channel, Thread, Forum post) — bỏ qua chat trong Voice/Stage
+    if isinstance(message.channel, (discord.VoiceChannel, discord.StageChannel)):
+        return
 
     member = message.author
     if not is_protected(member):
@@ -498,6 +519,45 @@ async def on_message(message: discord.Message):
             dup_bucket.append((now, norm_content, message))
             while dup_bucket and now - dup_bucket[0][0] > s["slow_spam_window"]:
                 dup_bucket.popleft()
+
+            # --- Raid detection (cross-channel): cùng nội dung bắn vào NHIỀU KÊNH KHÁC NHAU
+            # trong 1 khoảng thời gian rất ngắn -> softban ngay, ưu tiên trước spam chậm.
+            raid_window_msgs = [
+                m for (ts, c, m) in dup_bucket
+                if c == norm_content and now - ts <= s["raid_channel_spam_window"]
+            ]
+            raid_channels = {}
+            for m in raid_window_msgs:
+                raid_channels.setdefault(m.channel.id, m.channel)
+
+            if len(raid_channels) >= s["raid_channel_spam_threshold"]:
+                dup_bucket.clear()
+                _prune_empty(recent_message_contents, key)
+
+                channels_list = list(raid_channels.values())
+                channels_text = ", ".join(c.mention for c in channels_list)
+                event_time = discord.utils.utcnow()
+                content_preview = message.content if len(message.content) <= 300 else message.content[:300] + "…"
+
+                await bulk_delete_messages(message.guild, raid_window_msgs)
+                did_softban = await softban(
+                    message.guild,
+                    member,
+                    reason=f"Anti-raid: spam cùng nội dung vào {len(raid_channels)} kênh trong {s['raid_channel_spam_window']}s",
+                    delete_seconds=s["raid_softban_delete_seconds"],
+                )
+
+                await log(
+                    message.guild,
+                    "🚨 **RAID DETECTED (cross-channel spam)**\n"
+                    f"• Người vi phạm: {member.mention} (`{member.id}`)\n"
+                    f"• Số kênh bị spam: {len(raid_channels)} — {channels_text}\n"
+                    f"• Thời gian: {discord.utils.format_dt(event_time, style='F')}\n"
+                    f"• Nội dung spam: ```{content_preview}```\n"
+                    f"• Hành động: {'Đã softban (ban + unban, xóa tin nhắn gần đây)' if did_softban else '⚠️ Softban thất bại — kiểm tra quyền Ban Members của bot'}",
+                    discord.Color.red(),
+                )
+                return
 
             same_content_msgs = [m for (_, c, m) in dup_bucket if c == norm_content]
 
@@ -715,6 +775,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Nuke", value=f"{s['nuke_action_threshold']} actions / {s['nuke_action_window']}s", inline=False)
     embed.add_field(name="Spam nhanh", value=f"{s['spam_msg_threshold']} msgs / {s['spam_msg_window']}s", inline=False)
     embed.add_field(name="Spam chậm", value=f"{s['slow_spam_duplicate_threshold']} tin trùng / {s['slow_spam_window']}s", inline=False)
+    embed.add_field(name="Raid cross-channel", value=f"{s['raid_channel_spam_threshold']} kênh / {s['raid_channel_spam_window']}s → softban", inline=False)
     embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
     embed.add_field(name="Scam domains", value=str(len(s["scam_domains"])), inline=True)
     embed.add_field(name="Blocked bots", value=str(len(s["blocked_bot_ids"])), inline=True)

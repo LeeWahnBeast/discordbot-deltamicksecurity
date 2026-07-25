@@ -443,43 +443,46 @@ async def bulk_delete_messages(guild: discord.Guild, msgs: list[discord.Message]
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
+    if not message.guild or message.author.id == bot.user.id:
         return
     # Chỉ theo dõi kênh văn bản (Text Channel, Thread, Forum post) — bỏ qua chat trong Voice/Stage
     if isinstance(message.channel, (discord.VoiceChannel, discord.StageChannel)):
         return
 
     member = message.author
+    is_other_bot = member.bot  # bot khác (kể cả raid bot) — vẫn cần theo dõi raid, nhưng bỏ qua vài check gây phiền (badword/timeout)
     if not is_protected(member):
         s = cfg(message.guild.id)
 
-        # anti-badword
-        if s["badwords"]:
-            hit_word = contains_badword(message.content, s["badwords"])
-            if hit_word:
-                await safe_action(message.delete(), action_name="delete badword message", guild_id=message.guild.id)
-                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{hit_word}`) của {member.mention}", discord.Color.gold())
-                return
+        # anti-badword và anti-scam: chỉ áp dụng cho người dùng thật, tránh làm phiền bot hợp lệ
+        # (webhook/log bot khác) — raid bot vẫn bị bắt ở phần raid-detection bên dưới.
+        if not is_other_bot:
+            if s["badwords"]:
+                hit_word = contains_badword(message.content, s["badwords"])
+                if hit_word:
+                    await safe_action(message.delete(), action_name="delete badword message", guild_id=message.guild.id)
+                    await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{hit_word}`) của {member.mention}", discord.Color.gold())
+                    return
 
-        # anti-scam
-        content = message.content
-        urls = URL_RE.findall(content)
-        hit = None
-        if SCAM_PATTERN.search(content):
-            hit = "known phishing pattern"
-        else:
-            for host in urls:
-                host = host.lower().split(":")[0]
-                for bad in s["scam_domains"]:
-                    if host == bad or host.endswith("." + bad):
-                        hit = host
-                        break
-        if hit:
-            await safe_action(message.delete(), action_name="delete scam message", guild_id=message.guild.id)
-            until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
-            await safe_action(member.timeout(until, reason=f"Anti-scam: {hit}"), action_name="timeout scammer", guild_id=message.guild.id)
-            await log(message.guild, f"🎣 Chặn link scam (`{hit}`) từ {member.mention}", discord.Color.dark_gold())
-            return
+            # anti-scam
+            content = message.content
+            urls = URL_RE.findall(content)
+            hit = None
+            if SCAM_PATTERN.search(content):
+                hit = "known phishing pattern"
+            else:
+                for host in urls:
+                    host = host.lower().split(":")[0]
+                    for bad in s["scam_domains"]:
+                        if host == bad or host.endswith("." + bad):
+                            hit = host
+                            break
+            if hit:
+                await safe_action(message.delete(), action_name="delete scam message", guild_id=message.guild.id)
+                until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
+                await safe_action(member.timeout(until, reason=f"Anti-scam: {hit}"), action_name="timeout scammer", guild_id=message.guild.id)
+                await log(message.guild, f"🎣 Chặn link scam (`{hit}`) từ {member.mention}", discord.Color.dark_gold())
+                return
 
         # anti-spam NHANH (nhiều tin bất kỳ trong thời gian ngắn)
         key = (message.guild.id, member.id)
@@ -504,9 +507,14 @@ async def on_message(message: discord.Message):
                     hit_channels.append(m.channel)
             channels_note = f" — trải qua {len(hit_channels)} kênh: " + ", ".join(c.mention for c in hit_channels) if len(hit_channels) > 1 else ""
 
-            until = discord.utils.utcnow() + datetime.timedelta(seconds=s["spam_timeout_seconds"])
-            await safe_action(member.timeout(until, reason="Anti-spam: spam tin nhắn"), action_name="timeout spammer", guild_id=message.guild.id)
-            await log(message.guild, f"⏱️ {member.mention} bị timeout vì spam ({len(msgs)} tin){channels_note}", discord.Color.orange())
+            # bot không thể bị timeout (giới hạn của Discord API) -> softban thay thế
+            if is_other_bot:
+                await softban(message.guild, member, reason="Anti-spam: bot spam tin nhắn", delete_seconds=s["raid_softban_delete_seconds"])
+                await log(message.guild, f"⏱️🤖 {member.mention} (bot) bị softban vì spam ({len(msgs)} tin){channels_note}", discord.Color.orange())
+            else:
+                until = discord.utils.utcnow() + datetime.timedelta(seconds=s["spam_timeout_seconds"])
+                await safe_action(member.timeout(until, reason="Anti-spam: spam tin nhắn"), action_name="timeout spammer", guild_id=message.guild.id)
+                await log(message.guild, f"⏱️ {member.mention} bị timeout vì spam ({len(msgs)} tin){channels_note}", discord.Color.orange())
             return
         else:
             _prune_empty(recent_messages, key)
@@ -577,12 +585,15 @@ async def on_message(message: discord.Message):
 
                 await bulk_delete_messages(message.guild, same_content_msgs)
 
-                until = discord.utils.utcnow() + datetime.timedelta(seconds=s["slow_spam_timeout_seconds"])
-                await safe_action(
-                    member.timeout(until, reason="Anti-spam: lặp lại cùng 1 nội dung nhiều lần"),
-                    action_name="timeout slow spammer",
-                    guild_id=message.guild.id,
-                )
+                if is_other_bot:
+                    await softban(message.guild, member, reason="Anti-spam: bot lặp lại cùng nội dung", delete_seconds=s["raid_softban_delete_seconds"])
+                else:
+                    until = discord.utils.utcnow() + datetime.timedelta(seconds=s["slow_spam_timeout_seconds"])
+                    await safe_action(
+                        member.timeout(until, reason="Anti-spam: lặp lại cùng 1 nội dung nhiều lần"),
+                        action_name="timeout slow spammer",
+                        guild_id=message.guild.id,
+                    )
 
                 verdict = (
                     f"➡️ **Kết luận: cùng 1 người ({member.mention}) đã rải nội dung này qua "

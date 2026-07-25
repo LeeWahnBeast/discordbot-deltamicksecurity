@@ -36,11 +36,21 @@ DEFAULTS = {
     "nuke_action_threshold": 3,    # số hành động phá hoại...
     "nuke_action_window": 15,      # ...trong X giây thì coi là nuke
     "spam_msg_threshold": 6,       # số tin nhắn...
-    "spam_msg_window": 7,          # ...trong X giây thì coi là spam
+    "spam_msg_window": 7,          # ...trong X giây thì coi là spam (spam NHANH)
     "spam_timeout_seconds": 300,
+    "slow_spam_duplicate_threshold": 4,   # số tin GIỐNG NHAU...
+    "slow_spam_window": 120,              # ...trong X giây thì coi là spam CHẬM (vd bot rải tin cách nhau 10-30s)
+    "slow_spam_timeout_seconds": 600,
     "badwords": [],
     "scam_domains": [],
+    "blocked_bot_ids": [],           # ID bot bị chặn cứng, ban ngay khi join
+    "auto_ban_suspicious_bots": True,  # tự ban bot có username khả nghi (None/rỗng/toàn ký tự lạ)
 }
+
+# Tên hiển thị mà raid-bot hay dùng khi client không render được username (bug/null)
+SUSPICIOUS_BOT_NAME_PATTERN = re.compile(
+    r"^(none|null|undefined|nan|unknown)$", re.IGNORECASE
+)
 
 if os.path.exists(SETTINGS_FILE):
     with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -83,6 +93,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 recent_joins = defaultdict(deque)         # guild_id -> [timestamps]
 recent_nuke_actions = defaultdict(deque)  # (guild_id, user_id) -> [timestamps]
 recent_messages = defaultdict(deque)      # (guild_id, user_id) -> [(ts, message)]
+recent_message_contents = defaultdict(deque)  # (guild_id, user_id) -> [(ts, normalized_content, message)]
 raid_state = {}                           # guild_id -> {"active": bool, "last_seen": ts, "old_level": VerificationLevel}
 
 
@@ -149,6 +160,15 @@ def contains_badword(content: str, badwords: list[str]) -> str | None:
     return None
 
 
+def normalize_for_dedupe(content: str) -> str:
+    """Chuẩn hóa nội dung để so trùng lặp: bỏ khoảng trắng thừa, lowercase.
+    Không dùng hàm normalize() né-luật vì ở đây ta muốn so khớp gần-nguyên-văn,
+    không phải bắt từ khóa."""
+    text = content.strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
 def is_protected(member: discord.Member) -> bool:
     if member.id in OWNER_IDS:
         return True
@@ -212,10 +232,46 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 # --- Anti-raid: theo dõi tốc độ join, tự hạ verification level khi hết raid --
+def _is_suspicious_bot(member: discord.Member) -> str | None:
+    """Trả về lý do nếu bot có tên khả nghi (None/rỗng/toàn ký tự đặc biệt), None nếu bình thường."""
+    if not member.bot:
+        return None
+    name = (member.name or "").strip()
+    global_name = (member.global_name or "").strip() if member.global_name else ""
+    if not name and not global_name:
+        return "tên rỗng"
+    if SUSPICIOUS_BOT_NAME_PATTERN.match(name) or SUSPICIOUS_BOT_NAME_PATTERN.match(global_name):
+        return "tên hiển thị 'None/null/undefined'"
+    return None
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
     guild = member.guild
     s = cfg(guild.id)
+
+    # --- chặn bot theo blocklist ID hoặc tên khả nghi, xử lý trước mọi thứ khác ---
+    if member.bot:
+        if member.id in set(s["blocked_bot_ids"]):
+            await safe_action(
+                member.ban(reason=f"Blocklist: bot ID {member.id} bị chặn cứng"),
+                action_name="ban blocklisted bot",
+                guild_id=guild.id,
+            )
+            await log(guild, f"🤖⛔ Đã ban bot bị chặn `{member.id}` (`{member}`)", discord.Color.dark_red())
+            return
+
+        if s.get("auto_ban_suspicious_bots", True):
+            reason = _is_suspicious_bot(member)
+            if reason:
+                await safe_action(
+                    member.ban(reason=f"Anti-raid: bot khả nghi ({reason})"),
+                    action_name="ban suspicious bot",
+                    guild_id=guild.id,
+                )
+                await log(guild, f"🤖⛔ Đã ban bot khả nghi `{member.id}` — lý do: {reason}", discord.Color.dark_red())
+                return
+
     now = time.time()
     joins = recent_joins[guild.id]
     joins.append(now)
@@ -345,6 +401,28 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
 
 
 # --- Anti-spam + Anti-badword + Anti-scam: xử lý tin nhắn -----------------
+async def bulk_delete_messages(guild: discord.Guild, msgs: list[discord.Message]):
+    """Xóa hàng loạt tin nhắn, gom theo channel, dùng bulk delete khi có thể."""
+    by_channel: dict[int, list[discord.Message]] = defaultdict(list)
+    for m in msgs:
+        by_channel[m.channel.id].append(m)
+
+    for channel_id, chan_msgs in by_channel.items():
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            continue
+        fresh_cutoff = discord.utils.utcnow() - datetime.timedelta(days=14)
+        bulk_eligible = [m for m in chan_msgs if m.created_at > fresh_cutoff]
+        too_old = [m for m in chan_msgs if m.created_at <= fresh_cutoff]
+
+        if len(bulk_eligible) == 1:
+            await safe_action(bulk_eligible[0].delete(), action_name="delete spam message", guild_id=guild.id)
+        elif bulk_eligible:
+            await safe_action(channel.delete_messages(bulk_eligible), action_name="bulk delete spam", guild_id=guild.id)
+        for m in too_old:
+            await safe_action(m.delete(), action_name="delete old spam message", guild_id=guild.id)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
@@ -382,7 +460,7 @@ async def on_message(message: discord.Message):
             await log(message.guild, f"🎣 Chặn link scam (`{hit}`) từ {member.mention}", discord.Color.dark_gold())
             return
 
-        # anti-spam
+        # anti-spam NHANH (nhiều tin bất kỳ trong thời gian ngắn)
         key = (message.guild.id, member.id)
         now = time.time()
         bucket = recent_messages[key]
@@ -395,33 +473,74 @@ async def on_message(message: discord.Message):
             bucket.clear()
             _prune_empty(recent_messages, key)
 
-            # gom theo channel để dùng bulk delete (nhanh, ít rate-limit hơn xóa từng cái)
-            by_channel: dict[int, list[discord.Message]] = defaultdict(list)
+            await bulk_delete_messages(message.guild, msgs)
+
+            hit_channels = []
+            seen_ids = set()
             for m in msgs:
-                by_channel[m.channel.id].append(m)
-
-            for channel_id, chan_msgs in by_channel.items():
-                channel = message.guild.get_channel(channel_id)
-                if channel is None:
-                    continue
-                # bulk delete chỉ xóa được tin nhắn <14 ngày tuổi, và tối đa 100 tin/lần
-                fresh_cutoff = discord.utils.utcnow() - datetime.timedelta(days=14)
-                bulk_eligible = [m for m in chan_msgs if m.created_at > fresh_cutoff]
-                too_old = [m for m in chan_msgs if m.created_at <= fresh_cutoff]
-
-                if len(bulk_eligible) == 1:
-                    await safe_action(bulk_eligible[0].delete(), action_name="delete spam message", guild_id=message.guild.id)
-                elif bulk_eligible:
-                    await safe_action(channel.delete_messages(bulk_eligible), action_name="bulk delete spam", guild_id=message.guild.id)
-                for m in too_old:
-                    await safe_action(m.delete(), action_name="delete old spam message", guild_id=message.guild.id)
+                if m.channel.id not in seen_ids:
+                    seen_ids.add(m.channel.id)
+                    hit_channels.append(m.channel)
+            channels_note = f" — trải qua {len(hit_channels)} kênh: " + ", ".join(c.mention for c in hit_channels) if len(hit_channels) > 1 else ""
 
             until = discord.utils.utcnow() + datetime.timedelta(seconds=s["spam_timeout_seconds"])
             await safe_action(member.timeout(until, reason="Anti-spam: spam tin nhắn"), action_name="timeout spammer", guild_id=message.guild.id)
-            await log(message.guild, f"⏱️ {member.mention} bị timeout vì spam ({len(msgs)} tin)", discord.Color.orange())
+            await log(message.guild, f"⏱️ {member.mention} bị timeout vì spam ({len(msgs)} tin){channels_note}", discord.Color.orange())
             return
         else:
             _prune_empty(recent_messages, key)
+
+        # anti-spam CHẬM (cùng 1 nội dung lặp lại nhiều lần trong cửa sổ dài,
+        # kể cả khi rải cách nhau 10-30s để né ngưỡng spam nhanh)
+        norm_content = normalize_for_dedupe(message.content)
+        if norm_content:  # bỏ qua tin rỗng/chỉ có attachment
+            dup_bucket = recent_message_contents[key]
+            dup_bucket.append((now, norm_content, message))
+            while dup_bucket and now - dup_bucket[0][0] > s["slow_spam_window"]:
+                dup_bucket.popleft()
+
+            same_content_msgs = [m for (_, c, m) in dup_bucket if c == norm_content]
+
+            if len(same_content_msgs) >= s["slow_spam_duplicate_threshold"]:
+                dup_bucket.clear()
+                _prune_empty(recent_message_contents, key)
+
+                # liệt kê các kênh bị dính để có bằng chứng rõ ràng đây là 1 người rải nhiều kênh
+                hit_channels = []
+                seen_ids = set()
+                for m in same_content_msgs:
+                    if m.channel.id not in seen_ids:
+                        seen_ids.add(m.channel.id)
+                        hit_channels.append(m.channel)
+                channels_text = ", ".join(c.mention for c in hit_channels)
+                cross_channel = len(hit_channels) > 1
+
+                await bulk_delete_messages(message.guild, same_content_msgs)
+
+                until = discord.utils.utcnow() + datetime.timedelta(seconds=s["slow_spam_timeout_seconds"])
+                await safe_action(
+                    member.timeout(until, reason="Anti-spam: lặp lại cùng 1 nội dung nhiều lần"),
+                    action_name="timeout slow spammer",
+                    guild_id=message.guild.id,
+                )
+
+                verdict = (
+                    f"➡️ **Kết luận: cùng 1 người ({member.mention}) đã rải nội dung này qua "
+                    f"{len(hit_channels)} kênh khác nhau** — không phải trùng hợp ngẫu nhiên."
+                    if cross_channel else
+                    f"➡️ Rải lặp trong cùng 1 kênh ({channels_text})."
+                )
+                await log(
+                    message.guild,
+                    f"🐌⏱️ {member.mention} bị timeout vì spam CHẬM — lặp lại cùng nội dung "
+                    f"{len(same_content_msgs)} lần trong {s['slow_spam_window']}s.\n"
+                    f"Các kênh bị dính: {channels_text}\n"
+                    f"{verdict}",
+                    discord.Color.orange(),
+                )
+                return
+            else:
+                _prune_empty(recent_message_contents, key)
 
 
 # ---------------------------------------------------------------- commands -
@@ -500,6 +619,91 @@ async def listscam(interaction: discord.Interaction):
     await interaction.response.send_message(f"**Danh sách domain scam ({len(s['scam_domains'])}):**\n{text}", ephemeral=True)
 
 
+@bot.tree.command(name="blockbot", description="Chặn cứng 1 bot theo ID, ban ngay nếu đang có trong server")
+@admin_only()
+async def blockbot(interaction: discord.Interaction, bot_id: str):
+    if not bot_id.isdigit():
+        await interaction.response.send_message("❌ Bot ID phải là số.", ephemeral=True)
+        return
+    bid = int(bot_id)
+    s = cfg(interaction.guild.id)
+    if bid not in s["blocked_bot_ids"]:
+        s["blocked_bot_ids"].append(bid)
+        await save()
+
+    member = interaction.guild.get_member(bid)
+    banned_now = False
+    if member:
+        result = await safe_action(
+            member.ban(reason=f"Blocklist: bot ID {bid} bị admin chặn thủ công"),
+            action_name="ban blocklisted bot (manual)",
+            guild_id=interaction.guild.id,
+        )
+        banned_now = result is not None or True  # coi như đã thử; safe_action đã log lỗi nếu có
+
+    msg = f"✅ Đã thêm bot ID `{bid}` vào blocklist."
+    if member:
+        msg += " Đã ban ngay vì đang có trong server."
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="unblockbot", description="Bỏ chặn 1 bot ID khỏi blocklist")
+@admin_only()
+async def unblockbot(interaction: discord.Interaction, bot_id: str):
+    if not bot_id.isdigit():
+        await interaction.response.send_message("❌ Bot ID phải là số.", ephemeral=True)
+        return
+    bid = int(bot_id)
+    s = cfg(interaction.guild.id)
+    s["blocked_bot_ids"] = [b for b in s["blocked_bot_ids"] if b != bid]
+    await save()
+    await interaction.response.send_message(f"✅ Đã bỏ chặn bot ID `{bid}`.", ephemeral=True)
+
+
+@bot.tree.command(name="listblockedbots", description="Xem danh sách bot bị chặn")
+@admin_only()
+async def listblockedbots(interaction: discord.Interaction):
+    s = cfg(interaction.guild.id)
+    if not s["blocked_bot_ids"]:
+        await interaction.response.send_message("Chưa chặn bot ID nào.", ephemeral=True)
+        return
+    text = ", ".join(f"`{b}`" for b in s["blocked_bot_ids"])
+    await interaction.response.send_message(f"**Bot bị chặn ({len(s['blocked_bot_ids'])}):**\n{text}", ephemeral=True)
+
+
+@bot.tree.command(name="scanbots", description="Quét bot đang có trong server, ban những bot khớp blocklist hoặc tên khả nghi")
+@admin_only()
+async def scanbots(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    s = cfg(interaction.guild.id)
+    blocked_ids = set(s["blocked_bot_ids"])
+    banned = []
+    for member in interaction.guild.members:
+        if not member.bot or is_protected(member):
+            continue
+        reason = None
+        if member.id in blocked_ids:
+            reason = f"trong blocklist (`{member.id}`)"
+        elif s.get("auto_ban_suspicious_bots", True):
+            sus = _is_suspicious_bot(member)
+            if sus:
+                reason = sus
+        if reason:
+            result = await safe_action(
+                member.ban(reason=f"Anti-bot scan: {reason}"),
+                action_name="ban bot from scan",
+                guild_id=interaction.guild.id,
+            )
+            banned.append(f"{member} (`{member.id}`) — {reason}")
+
+    if banned:
+        text = "\n".join(banned)
+        await log(interaction.guild, f"🤖⛔ **Scan bot** — đã ban {len(banned)} bot:\n{text}", discord.Color.dark_red())
+        await interaction.followup.send(f"✅ Đã ban {len(banned)} bot khả nghi:\n{text}", ephemeral=True)
+    else:
+        await interaction.followup.send("Không tìm thấy bot nào khả nghi.", ephemeral=True)
+
+
 @bot.tree.command(name="status", description="Xem cấu hình bảo mật hiện tại")
 @admin_only()
 async def status(interaction: discord.Interaction):
@@ -509,9 +713,12 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Log channel", value=log_ch.mention if log_ch else "chưa đặt", inline=False)
     embed.add_field(name="Raid", value=f"{s['raid_join_threshold']} joins / {s['raid_join_window']}s", inline=False)
     embed.add_field(name="Nuke", value=f"{s['nuke_action_threshold']} actions / {s['nuke_action_window']}s", inline=False)
-    embed.add_field(name="Spam", value=f"{s['spam_msg_threshold']} msgs / {s['spam_msg_window']}s", inline=False)
+    embed.add_field(name="Spam nhanh", value=f"{s['spam_msg_threshold']} msgs / {s['spam_msg_window']}s", inline=False)
+    embed.add_field(name="Spam chậm", value=f"{s['slow_spam_duplicate_threshold']} tin trùng / {s['slow_spam_window']}s", inline=False)
     embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
     embed.add_field(name="Scam domains", value=str(len(s["scam_domains"])), inline=True)
+    embed.add_field(name="Blocked bots", value=str(len(s["blocked_bot_ids"])), inline=True)
+    embed.add_field(name="Auto-ban bot tên None/null", value="Bật" if s.get("auto_ban_suspicious_bots", True) else "Tắt", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

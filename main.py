@@ -172,9 +172,13 @@ def normalize_for_dedupe(content: str) -> str:
     return text
 
 
-def is_protected(member: discord.Member) -> bool:
+def is_protected(member: discord.abc.User) -> bool:
     if member.id in OWNER_IDS:
         return True
+    if not isinstance(member, discord.Member):
+        # Chỉ có discord.User (không phải Member trong cache) -> không biết role/permission,
+        # coi như KHÔNG được bảo vệ để không bỏ sót kiểm duyệt.
+        return False
     if member.guild and member.id == member.guild.owner_id:
         return True
     return member.guild_permissions.administrator
@@ -450,6 +454,21 @@ async def on_message(message: discord.Message):
         return
 
     member = message.author
+    if not isinstance(member, discord.Member):
+        # message.author có thể là discord.User (thiếu .guild, .guild_permissions, .timeout, ...)
+        # khi cache thành viên chưa kịp cập nhật -> thường gặp với bot vừa join. Resolve lại.
+        resolved = message.guild.get_member(member.id)
+        if resolved is None:
+            resolved = await safe_action(
+                message.guild.fetch_member(member.id),
+                action_name="fetch member for message author",
+                guild_id=message.guild.id,
+            )
+        if resolved is None:
+            # Không resolve được (có thể đã rời server ngay sau khi gửi tin) -> bỏ qua, tránh crash.
+            return
+        member = resolved
+
     is_other_bot = member.bot  # bot khác (kể cả raid bot) — vẫn cần theo dõi raid, nhưng bỏ qua vài check gây phiền (badword/timeout)
     if not is_protected(member):
         s = cfg(message.guild.id)

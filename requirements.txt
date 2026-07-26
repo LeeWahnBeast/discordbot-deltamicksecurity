@@ -1,4 +1,5 @@
 discord.py==2.4.0
 flask==3.0.3
+aiohttp>=3.9.0
+psutil>=5.9.0
 audioop-lts; python_version >= "3.13"
-

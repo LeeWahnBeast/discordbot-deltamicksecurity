@@ -2092,13 +2092,28 @@ async def togglesuspiciousbots(interaction: discord.Interaction):
 
 @bot.tree.command(name="setconfig", description="Chỉnh 1 ngưỡng cấu hình bảo mật (số nguyên)")
 @admin_only()
-@app_commands.choices(key=[app_commands.Choice(name=k, value=k) for k in CONFIGURABLE_INT_KEYS])
-async def setconfig(interaction: discord.Interaction, key: app_commands.Choice[str], value: int):
+async def setconfig(interaction: discord.Interaction, key: str, value: int):
+    if key not in CONFIGURABLE_INT_KEYS:
+        await interaction.response.send_message(
+            f"❌ `{key}` không phải là tên cấu hình hợp lệ. Gõ vài ký tự để bot gợi ý, "
+            f"hoặc dùng `/exportconfig` để xem danh sách đầy đủ.",
+            ephemeral=True,
+        )
+        return
     if value < 0:
         await interaction.response.send_message("❌ Giá trị phải >= 0.", ephemeral=True)
         return
-    await set_and_save(interaction.guild.id, key.value, value)
-    await interaction.response.send_message(f"✅ Đã đặt `{key.value}` = `{value}`", ephemeral=True)
+    await set_and_save(interaction.guild.id, key, value)
+    await interaction.response.send_message(f"✅ Đã đặt `{key}` = `{value}`", ephemeral=True)
+
+
+@setconfig.autocomplete("key")
+async def setconfig_key_autocomplete(interaction: discord.Interaction, current: str):
+    # NEW: dùng autocomplete động thay vì app_commands.choices tĩnh, vì Discord giới hạn
+    # choices tĩnh tối đa 25 — trong khi CONFIGURABLE_INT_KEYS đã vượt xa con số đó.
+    current = (current or "").lower()
+    matches = [k for k in CONFIGURABLE_INT_KEYS if current in k.lower()]
+    return [app_commands.Choice(name=k, value=k) for k in matches[:25]]
 
 
 @bot.tree.command(name="resetconfig", description="Reset toàn bộ cấu hình bảo mật của server về mặc định")

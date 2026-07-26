@@ -20,9 +20,29 @@ logger = logging.getLogger("securitybot")
 TOKEN = os.getenv("DISCORD_TOKEN")
 OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
 PREFIX = os.getenv("PREFIX", "!")
-SETTINGS_FILE = "settings.json"
-BACKUP_FILE = "backup.json"
-STATS_FILE = "stats.json"
+
+# ── Firestore setup ──────────────────────────────────────────────────────
+# Yêu cầu biến môi trường GOOGLE_APPLICATION_CREDENTIALS_JSON (nội dung JSON
+# của service account key) HOẶC GOOGLE_APPLICATION_CREDENTIALS (đường dẫn file).
+# Collection layout:
+#   settings/{guild_id}      -> toàn bộ config của guild
+#   backups/{guild_id}       -> snapshot backup gần nhất
+#   stats/{guild_id}/days/{YYYY-MM-DD} -> thống kê theo ngày
+from google.cloud import firestore as _firestore
+from google.oauth2 import service_account as _service_account
+
+def _make_firestore_client():
+    raw_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if raw_json:
+        info = json.loads(raw_json)
+        creds = _service_account.Credentials.from_service_account_info(info)
+        return _firestore.Client(credentials=creds, project=info.get("project_id"))
+    return _firestore.Client()
+
+db = _make_firestore_client()
+SETTINGS_COLLECTION = "settings"
+BACKUP_COLLECTION = "backups"
+STATS_COLLECTION = "stats"
 DEFAULTS = {
     "log_channel_id": None,
     "log_webhook_url": None,
@@ -167,67 +187,98 @@ REDIRECT_DOMAINS = {
     "bit.ly", "tinyurl.com", "t.co", "is.gd", "cutt.ly", "shorturl.at",
     "rebrand.ly", "ow.ly", "buff.ly", "shorte.st", "adf.ly",
 }
-if os.path.exists(SETTINGS_FILE):
-    with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-        settings = json.load(f)
-else:
+# ── In-RAM cache, backed by Firestore ────────────────────────────────────
+# Toàn bộ code cũ đọc/ghi trực tiếp vào 3 dict này (settings/backups/stats).
+# Để không phải viết lại hàng trăm chỗ, ta giữ nguyên dict làm cache RAM,
+# nhưng nguồn sự thật (source of truth) là Firestore: load 1 lần khi khởi
+# động, và mỗi lần save() sẽ ghi thẳng lên Firestore (không còn file .json).
+settings: dict = {}
+backups: dict = {}
+stats: dict = {}
+_dirty_stats_guilds: set[str] = set()
+
+def _load_all_sync():
+    global settings, backups, stats
     settings = {}
-if os.path.exists(BACKUP_FILE):
-    with open(BACKUP_FILE, "r", encoding="utf-8") as f:
-        backups = json.load(f)
-else:
+    for doc in db.collection(SETTINGS_COLLECTION).stream():
+        settings[doc.id] = doc.to_dict() or {}
     backups = {}
-if os.path.exists(STATS_FILE):
-    with open(STATS_FILE, "r", encoding="utf-8") as f:
-        stats = json.load(f)
-else:
+    for doc in db.collection(BACKUP_COLLECTION).stream():
+        backups[doc.id] = doc.to_dict() or {}
     stats = {}
+    for guild_doc in db.collection(STATS_COLLECTION).stream():
+        gid = guild_doc.id
+        stats[gid] = {}
+        for day_doc in db.collection(STATS_COLLECTION).document(gid).collection("days").stream():
+            stats[gid][day_doc.id] = day_doc.to_dict() or {}
+
 def cfg(guild_id: int) -> dict:
     g = settings.setdefault(str(guild_id), {})
     merged = {**DEFAULTS, **g}
     settings[str(guild_id)] = merged
     return merged
-def _save_sync():
-    tmp = SETTINGS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, SETTINGS_FILE)
+
+def _save_guild_settings_sync(guild_id: str, data: dict):
+    db.collection(SETTINGS_COLLECTION).document(guild_id).set(data)
+
+def _save_all_settings_sync():
+    for gid, data in settings.items():
+        db.collection(SETTINGS_COLLECTION).document(gid).set(data)
+
 def _save_backup_sync():
-    tmp = BACKUP_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(backups, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, BACKUP_FILE)
+    for gid, data in backups.items():
+        db.collection(BACKUP_COLLECTION).document(gid).set(data)
+
 def _save_stats_sync():
-    tmp = STATS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(stats, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, STATS_FILE)
+    # Chỉ ghi những guild/ngày có thay đổi (tránh ghi tràn lan -> tiết kiệm CPU/quota).
+    for gid in list(_dirty_stats_guilds):
+        guild_stats = stats.get(gid, {})
+        for day_key, day_data in guild_stats.items():
+            db.collection(STATS_COLLECTION).document(gid).collection("days").document(day_key).set(day_data)
+    _dirty_stats_guilds.clear()
+
 async def save():
     try:
-        await asyncio.to_thread(_save_sync)
-    except OSError:
-        logger.exception("Không thể lưu settings.json")
+        await asyncio.to_thread(_save_all_settings_sync)
+    except Exception:
+        logger.exception("Không thể lưu settings lên Firestore")
+async def save_guild_settings(guild_id: int):
+    try:
+        await asyncio.to_thread(_save_guild_settings_sync, str(guild_id), settings.get(str(guild_id), {}))
+    except Exception:
+        logger.exception("Không thể lưu settings guild %s lên Firestore", guild_id)
 async def save_backup():
     try:
         await asyncio.to_thread(_save_backup_sync)
-    except OSError:
-        logger.exception("Không thể lưu backup.json")
+    except Exception:
+        logger.exception("Không thể lưu backup lên Firestore")
+def _save_guild_backup_sync(guild_id: str, data: dict):
+    db.collection(BACKUP_COLLECTION).document(guild_id).set(data)
+async def save_guild_backup(guild_id: int):
+    try:
+        await asyncio.to_thread(_save_guild_backup_sync, str(guild_id), backups.get(str(guild_id), {}))
+    except Exception:
+        logger.exception("Không thể lưu backup guild %s lên Firestore", guild_id)
 async def save_stats():
+    if not _dirty_stats_guilds:
+        return
     try:
         await asyncio.to_thread(_save_stats_sync)
-    except OSError:
-        logger.exception("Không thể lưu stats.json")
+    except Exception:
+        logger.exception("Không thể lưu stats lên Firestore")
 async def set_and_save(guild_id: int, key: str, value) -> None:
     s = cfg(guild_id)
     s[key] = value
     settings[str(guild_id)] = s
-    await save()
+    await save_guild_settings(guild_id)
 def _today_key() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m-%d")
 def bump_stat(guild_id: int, metric: str, amount: int = 1):
-    g = stats.setdefault(str(guild_id), {})
+    gid = str(guild_id)
+    g = stats.setdefault(gid, {})
     day = g.setdefault(_today_key(), {})
     day[metric] = day.get(metric, 0) + amount
+    _dirty_stats_guilds.add(gid)
 async def stats_save_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -415,9 +466,21 @@ def contains_badword(content: str, badwords: list[str]) -> str | None:
             if norm_word in squashed:
                 return w
     return None
+_DEDUPE_NOISE_RE = re.compile(
+    r"[^\w\s]|[\U0001F000-\U0001FFFF\u2600-\u27BF]", re.UNICODE
+)
+_DEDUPE_REPEAT_RE = re.compile(r"(.)\1{1,}")
+_DEDUPE_DIGIT_RE = re.compile(r"\d+")
 def normalize_for_dedupe(content: str) -> str:
+    # Fingerprint chống né lọc: bỏ emoji/dấu câu (mồi để phá exact-match),
+    # thay số bằng "#" (chống kiểu đếm 1,2,3... để né trùng lặp), và co
+    # ký tự lặp liên tiếp về 1 (chống "spammmm" / "sppaaam" biến thể).
+    # Vẫn là O(n), không tốn thêm CPU đáng kể so với bản cũ.
     text = strip_invisible_chars(content).strip().lower()
-    text = re.sub(r"\s+", " ", text)
+    text = _DEDUPE_NOISE_RE.sub("", text)
+    text = _DEDUPE_DIGIT_RE.sub("#", text)
+    text = _DEDUPE_REPEAT_RE.sub(r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 def _levenshtein(a: str, b: str) -> int:
     if a == b:
@@ -643,7 +706,7 @@ async def snapshot_guild(guild: discord.Guild):
         "categories": categories_data,
         "channels": channels_data,
     }
-    await save_backup()
+    await save_guild_backup(guild.id)
 async def backup_snapshot_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -1319,6 +1382,15 @@ async def bulk_delete_messages(guild: discord.Guild, msgs: list[discord.Message]
             await safe_action(channel.delete_messages(bulk_eligible), action_name="bulk delete spam", guild_id=guild.id)
         for m in too_old:
             await safe_action(m.delete(), action_name="delete old spam message", guild_id=guild.id)
+def mask_word(word: str) -> str:
+    if len(word) <= 2:
+        return (word[0] + "*") if word else word
+    return word[0] + "*" * (len(word) - 2) + word[-1]
+async def dm_warning(member: discord.Member, reason_text: str):
+    try:
+        await member.send(f"⚠️ Tin nhắn của bạn tại **{member.guild.name}** đã bị xóa: {reason_text}")
+    except discord.HTTPException:
+        pass
 def contains_token_grabber_keyword(content: str, keywords: list[str]) -> str | None:
     normalized = normalize(content)
     for kw in keywords:
@@ -1383,20 +1455,22 @@ async def on_message(message: discord.Message):
             until = discord.utils.utcnow() + datetime.timedelta(hours=1)
             await safe_action(member.timeout(until, reason=f"Anti-token-grabber: {tg_hit}"), action_name="timeout token grabber poster", guild_id=guild_id)
             score = add_suspicion(guild_id, member.id, "token_grabber", s["suspicion_decay_seconds"])
-            morse_note = f" (giải mã từ Morse: `{morse_decoded}`)" if morse_decoded else ""
-            await log(message.guild, f"🔐⚠️ Chặn nội dung nghi token grabber (`{tg_hit}`){morse_note} từ {member.mention}", discord.Color.dark_red(), critical=True)
+            morse_note = " (phát hiện qua giải mã Morse)" if morse_decoded else ""
+            await log(message.guild, f"🔐⚠️ Chặn nội dung nghi token grabber (từ khóa: `{mask_word(tg_hit)}`){morse_note} từ {member.mention}", discord.Color.dark_red(), critical=True)
             bump_stat(guild_id, "token_grabber_blocked", 1)
             await apply_suspicion_consequence(message.guild, member, score, s)
+            await dm_warning(member, "nội dung nghi ngờ liên quan đến token grabber/malware.")
             return
         if s["badwords"]:
             hit_word = contains_badword(check_content, s["badwords"])
             if hit_word:
                 await safe_action(message.delete(), action_name="delete badword message", guild_id=guild_id)
-                morse_note = f" (giải mã từ Morse: `{morse_decoded}`)" if morse_decoded else ""
-                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{hit_word}`){morse_note} của {member.mention}", discord.Color.gold())
+                morse_note = " (phát hiện qua giải mã Morse)" if morse_decoded else ""
+                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{mask_word(hit_word)}`){morse_note} của {member.mention}", discord.Color.gold())
                 bump_stat(guild_id, "badword_blocked", 1)
                 score = add_suspicion(guild_id, member.id, "badword", s["suspicion_decay_seconds"])
                 await apply_suspicion_consequence(message.guild, member, score, s)
+                await dm_warning(member, "chứa từ ngữ bị cấm trong server.")
                 return
         if is_zalgo(clean_content, s["zalgo_max_combining_chars"]):
             await safe_action(message.delete(), action_name="delete zalgo message", guild_id=guild_id)
@@ -1989,49 +2063,12 @@ async def resetconfig(interaction: discord.Interaction):
     settings[str(interaction.guild.id)]["whitelist_role_ids"] = []
     settings[str(interaction.guild.id)]["whitelist_bot_ids"] = []
     settings[str(interaction.guild.id)]["whitelist_webhook_ids"] = []
-    await save()
-    await interaction.response.send_message("✅ Đã reset cấu hình về mặc định.", ephemeral=True)
-@bot.tree.command(name="exportconfig", description="Xuất toàn bộ cấu hình đã lưu (JSON) của server")
-@admin_only()
-async def exportconfig(interaction: discord.Interaction):
-    s = cfg(interaction.guild.id)
-    text = json.dumps(s, indent=2, ensure_ascii=False)
-    if len(text) > 1900:
-        await interaction.response.send_message(
-            "⚠️ Config quá dài để hiện trực tiếp — mình gửi dưới dạng file đính kèm.",
-            ephemeral=True,
-        )
-        buf = json.dumps(s, indent=2, ensure_ascii=False).encode("utf-8")
-        import io
-        file = discord.File(io.BytesIO(buf), filename=f"config_{interaction.guild.id}.json")
-        await interaction.followup.send(file=file, ephemeral=True)
-        return
-    await interaction.response.send_message(f"```json\n{text}\n```", ephemeral=True)
-@bot.tree.command(name="importconfig", description="Nhập cấu hình từ file JSON đã export trước đó")
-@admin_only()
-async def importconfig(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.endswith(".json"):
-        await interaction.response.send_message("❌ File phải có định dạng .json", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    try:
-        raw = await file.read()
-        data = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        await interaction.followup.send("❌ File JSON không hợp lệ hoặc bị lỗi encoding.", ephemeral=True)
-        return
-    if not isinstance(data, dict):
-        await interaction.followup.send("❌ Nội dung JSON phải là một object cấu hình.", ephemeral=True)
-        return
-    merged = {**DEFAULTS}
-    imported_keys = []
-    for k, v in data.items():
-        if k in DEFAULTS:
-            merged[k] = v
-            imported_keys.append(k)
-    settings[str(interaction.guild.id)] = merged
-    await save()
-    await interaction.followup.send(f"✅ Đã import {len(imported_keys)} cấu hình từ file.", ephemeral=True)
+    await save_guild_settings(interaction.guild.id)
+    await interaction.response.send_message(
+        "✅ Đã reset cấu hình về mặc định. (Config được lưu trực tiếp trên Firestore — có thể "
+        "xem/sửa thủ công trong collection `settings` trên Firebase Console nếu cần.)",
+        ephemeral=True,
+    )
 @bot.tree.command(name="health", description="Xem tình trạng hoạt động của bot (RAM, ping, uptime, thống kê)")
 @admin_only()
 async def health(interaction: discord.Interaction):
@@ -2135,6 +2172,11 @@ async def status(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 @bot.event
 async def setup_hook():
+    try:
+        await asyncio.to_thread(_load_all_sync)
+        logger.info("Đã tải %d guild settings, %d backups, %d guild stats từ Firestore.", len(settings), len(backups), len(stats))
+    except Exception:
+        logger.exception("Không thể tải dữ liệu từ Firestore — bot sẽ chạy với cấu hình mặc định trống.")
     bot.loop.create_task(raid_cooldown_loop())
     bot.loop.create_task(backup_snapshot_loop())
     bot.loop.create_task(cleanup_loop())

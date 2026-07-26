@@ -56,6 +56,14 @@ DEFAULTS = {
     "raid_channel_spam_window": 10,
     "raid_softban_delete_seconds": 3600,
 
+    # NEW — Anti Spam Ngắt Quãng (rải 1 đợt -> nghỉ -> rải tiếp, né ngưỡng spam nhanh)
+    "intermittent_spam_burst_size": 3,       # số tin tối thiểu để tính là 1 "đợt rải"
+    "intermittent_spam_burst_gap": 4,        # khoảng cách tối đa (giây) giữa các tin trong CÙNG 1 đợt
+    "intermittent_spam_quiet_gap": 6,        # khoảng lặng tối thiểu (giây) giữa 2 đợt để coi là "ngắt quãng" có chủ đích
+    "intermittent_spam_burst_count": 3,      # cần ít nhất N đợt như vậy mới bị phát hiện
+    "intermittent_spam_window": 180,         # cửa sổ tổng quan sát các đợt
+    "intermittent_spam_timeout_seconds": 900,
+
     "mass_mention_threshold": 6,
     "mass_mention_timeout_seconds": 600,
 
@@ -132,6 +140,8 @@ CONFIGURABLE_INT_KEYS = [
     "spam_msg_threshold", "spam_msg_window", "spam_timeout_seconds",
     "slow_spam_duplicate_threshold", "slow_spam_window", "slow_spam_timeout_seconds",
     "raid_channel_spam_threshold", "raid_channel_spam_window", "raid_softban_delete_seconds",
+    "intermittent_spam_burst_size", "intermittent_spam_burst_gap", "intermittent_spam_quiet_gap",
+    "intermittent_spam_burst_count", "intermittent_spam_window", "intermittent_spam_timeout_seconds",
     "mass_mention_threshold", "mass_mention_timeout_seconds", "invite_new_account_days",
     "suspicion_ban_threshold", "suspicion_timeout_threshold", "suspicion_decay_seconds",
     "zalgo_max_combining_chars", "backup_snapshot_interval_seconds",
@@ -150,6 +160,7 @@ SUSPICION_WEIGHTS = {
     "invite_spam": 15,
     "spam_fast": 20,
     "spam_slow": 15,
+    "spam_intermittent": 25,
     "scam": 40,
     "nuke": 100,
     "mass_ban": 80,
@@ -286,6 +297,7 @@ recent_join_members = defaultdict(deque)  # NEW: lưu (ts, member) để phân t
 recent_nuke_actions = defaultdict(deque)
 recent_messages = defaultdict(deque)
 recent_message_contents = defaultdict(deque)
+message_timeline = defaultdict(deque)  # NEW: (guild_id, user_id) -> deque[ts] toàn bộ tin, để phát hiện spam ngắt quãng (rải-nghỉ-rải)
 raid_state = {}
 
 suspicion_scores: dict[tuple[int, int], list] = {}
@@ -302,6 +314,52 @@ recent_webhook_creates = defaultdict(deque)  # (guild_id, actor_id) -> deque[ts]
 def _prune_empty(d: defaultdict, key):
     if key in d and not d[key]:
         del d[key]
+
+
+def detect_intermittent_spam(items: list, s: dict):
+    """
+    NEW: Phát hiện kiểu spam "rải 1 đợt -> ngắt (nghỉ tay) -> rải tiếp -> ngắt -> rải tiếp..."
+    Đây là chiêu né spam_msg_threshold: mỗi đợt cố tình rải ít hơn ngưỡng, rồi dừng vài giây
+    trước khi rải đợt kế tiếp để bucket spam nhanh không bao giờ đầy.
+
+    items: danh sách (ts, message) đã sort theo ts tăng dần, trong phạm vi intermittent_spam_window.
+    Trả về danh sách các "đợt" (burst) hợp lệ — mỗi đợt là list[(ts, message)] — nếu phát hiện
+    pattern, ngược lại None.
+    """
+    if not items:
+        return None
+
+    burst_gap = s["intermittent_spam_burst_gap"]
+    burst_size = s["intermittent_spam_burst_size"]
+    quiet_gap = s["intermittent_spam_quiet_gap"]
+    burst_count = s["intermittent_spam_burst_count"]
+
+    # Gom cụm: các tin cách nhau <= burst_gap được coi là cùng 1 đợt rải
+    clusters = []
+    current = [items[0]]
+    for item in items[1:]:
+        if item[0] - current[-1][0] <= burst_gap:
+            current.append(item)
+        else:
+            clusters.append(current)
+            current = [item]
+    clusters.append(current)
+
+    # Chỉ giữ các cụm đủ lớn để tính là 1 "đợt rải" thật sự
+    bursts = [c for c in clusters if len(c) >= burst_size]
+    if len(bursts) < burst_count:
+        return None
+
+    # Giữa các đợt phải có khoảng lặng rõ ràng (chủ đích nghỉ để né bộ lọc),
+    # nếu không thì đó chỉ là spam nhanh bình thường, đã có bộ lọc riêng xử lý.
+    valid_gaps = sum(
+        1 for i in range(1, len(bursts))
+        if bursts[i][0][0] - bursts[i - 1][-1][0] >= quiet_gap
+    )
+
+    if valid_gaps >= burst_count - 1:
+        return bursts
+    return None
 
 
 SCAM_PATTERN = re.compile(
@@ -1444,6 +1502,55 @@ async def on_message(message: discord.Message):
 
     key = (guild_id, member.id)
     now = time.time()
+
+    # NEW: Anti spam ngắt quãng — rải 1 đợt, nghỉ, rải tiếp để né ngưỡng spam nhanh
+    timeline = message_timeline[key]
+    timeline.append((now, message))
+    while timeline and now - timeline[0][0] > s["intermittent_spam_window"]:
+        timeline.popleft()
+
+    intermittent_bursts = detect_intermittent_spam(list(timeline), s)
+    if intermittent_bursts:
+        timeline.clear()
+        _prune_empty(message_timeline, key)
+
+        burst_msgs = [m for burst in intermittent_bursts for _, m in burst]
+        await bulk_delete_messages(message.guild, burst_msgs)
+
+        if is_other_bot:
+            await softban(
+                message.guild, member,
+                reason="Anti-spam: spam ngắt quãng (bot rải-nghỉ-rải để né lọc)",
+                delete_seconds=s["raid_softban_delete_seconds"],
+            )
+            await log(
+                message.guild,
+                f"⏱️🤖🔁 {member.mention} (bot) bị softban vì spam ngắt quãng "
+                f"({len(intermittent_bursts)} đợt, {len(burst_msgs)} tin, cố tình nghỉ giữa các đợt để né lọc)",
+                discord.Color.orange(),
+            )
+        else:
+            until = discord.utils.utcnow() + datetime.timedelta(seconds=s["intermittent_spam_timeout_seconds"])
+            await safe_action(
+                member.timeout(until, reason="Anti-spam: spam ngắt quãng (rải rồi nghỉ rồi rải tiếp)"),
+                action_name="timeout intermittent spammer",
+                guild_id=guild_id,
+            )
+            await log(
+                message.guild,
+                f"⏱️🔁 {member.mention} bị timeout vì spam NGẮT QUÃNG — {len(intermittent_bursts)} đợt rải, "
+                f"tổng {len(burst_msgs)} tin, cố tình dừng giữa các đợt để né bộ lọc spam nhanh.",
+                discord.Color.orange(),
+            )
+            score = add_suspicion(guild_id, member.id, "spam_intermittent", s["suspicion_decay_seconds"])
+            await apply_suspicion_consequence(message.guild, member, score, s)
+
+        bump_stat(guild_id, "intermittent_spam_blocked", 1)
+        bump_stat(guild_id, "spam_blocked", 1)
+        return
+    else:
+        _prune_empty(message_timeline, key)
+
     bucket = recent_messages[key]
     bucket.append((now, message))
     while bucket and now - bucket[0][0] > s["spam_msg_window"]:
@@ -2104,6 +2211,7 @@ async def statscommand(interaction: discord.Interaction, days: int = 7):
         ("raid_blocked", "Raid bị chặn"),
         ("scam_blocked", "Scam bị chặn"),
         ("spam_blocked", "Spam bị chặn"),
+        ("intermittent_spam_blocked", "Spam ngắt quãng bị chặn"),
         ("badword_blocked", "Từ cấm bị chặn"),
         ("token_grabber_blocked", "Token grabber bị chặn"),
         ("nuke_blocked", "Nuke bị chặn"),
@@ -2146,6 +2254,14 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Nuke", value=f"{s['nuke_action_threshold']} actions / {s['nuke_action_window']}s", inline=False)
     embed.add_field(name="Spam nhanh", value=f"{s['spam_msg_threshold']} msgs / {s['spam_msg_window']}s", inline=False)
     embed.add_field(name="Spam chậm", value=f"{s['slow_spam_duplicate_threshold']} tin trùng / {s['slow_spam_window']}s", inline=False)
+    embed.add_field(
+        name="Spam ngắt quãng",
+        value=(
+            f"{s['intermittent_spam_burst_count']} đợt × {s['intermittent_spam_burst_size']} tin "
+            f"(nghỉ ≥{s['intermittent_spam_quiet_gap']}s giữa đợt) trong {s['intermittent_spam_window']}s"
+        ),
+        inline=False,
+    )
     embed.add_field(name="Raid cross-channel", value=f"{s['raid_channel_spam_threshold']} kênh / {s['raid_channel_spam_window']}s → softban", inline=False)
     embed.add_field(name="Mass mention", value=f"{s['mass_mention_threshold']} mentions/tin → timeout", inline=False)
     embed.add_field(name="Invite từ tk mới", value=f"< {s['invite_new_account_days']} ngày tuổi → xóa", inline=False)

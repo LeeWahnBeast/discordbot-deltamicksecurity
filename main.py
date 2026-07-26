@@ -894,6 +894,18 @@ def _is_suspicious_bot(member: discord.Member) -> str | None:
     return None
 
 
+def _is_discord_verified_bot(member: discord.Member) -> bool:
+    """
+    NEW: True nếu bot/app có huy hiệu ✓ (Verified) do CHÍNH Discord cấp sau khi review
+    (member.public_flags.verified_bot). Cờ này đến thẳng từ Discord API, không thể giả mạo
+    qua tên/avatar, nên có thể tin tưởng để loại trừ khỏi mọi bước nghi ngờ/raid bên dưới.
+    """
+    if not member.bot:
+        return False
+    flags = getattr(member, "public_flags", None)
+    return bool(flags and getattr(flags, "verified_bot", False))
+
+
 # ------------------------------------------------------- Join Pattern -----
 def _username_looks_random(name: str) -> bool:
     """Heuristic đơn giản: username toàn số, hoặc chuỗi ký tự+số vô nghĩa kiểu 'xk29fj1'."""
@@ -976,6 +988,17 @@ async def on_member_join(member: discord.Member):
             )
             await log(guild, f"🤖⛔ Đã ban bot bị chặn `{member.id}` (`{member}`)", discord.Color.dark_red())
             bump_stat(guild.id, "bot_banned", 1)
+            return
+
+        if _is_discord_verified_bot(member):
+            # NEW: Bot/app có huy hiệu ✓ (Verified) do Discord xác minh -> tin tưởng, bỏ qua
+            # toàn bộ kiểm tra nghi ngờ tên/raid bên dưới (kể cả kick do "tài khoản quá mới lúc raid").
+            # Không áp dụng cho bot nằm trong blocked_bot_ids ở trên — blocklist tay vẫn được ưu tiên.
+            await log(
+                guild,
+                f"🤖✅ Bot đã xác minh (Verified ✓) `{member}` (`{member.id}`) tham gia — bỏ qua kiểm tra nghi ngờ/raid.",
+                discord.Color.green(),
+            )
             return
 
         if s.get("auto_ban_suspicious_bots", True):
@@ -2059,6 +2082,9 @@ async def scanbots(interaction: discord.Interaction):
         reason = None
         if member.id in blocked_ids:
             reason = f"trong blocklist (`{member.id}`)"
+        elif _is_discord_verified_bot(member):
+            # NEW: bot đã có huy hiệu ✓ Verified từ Discord -> không đưa vào diện nghi ngờ
+            continue
         elif s.get("auto_ban_suspicious_bots", True):
             sus = _is_suspicious_bot(member)
             if sus:

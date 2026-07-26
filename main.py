@@ -8,132 +8,106 @@ import unicodedata
 import datetime
 from collections import defaultdict, deque, Counter
 from typing import Optional
-
 import discord
 from discord import app_commands
 from discord.ext import commands
-
 from keep_alive import keep_alive
-
-# ---------------------------------------------------------------- logging --
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("securitybot")
-
-# ---------------------------------------------------------------- config ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
 PREFIX = os.getenv("PREFIX", "!")
-
 SETTINGS_FILE = "settings.json"
 BACKUP_FILE = "backup.json"
 STATS_FILE = "stats.json"
-
 DEFAULTS = {
     "log_channel_id": None,
     "log_webhook_url": None,
     "alert_owner_on_critical": True,
-
     "raid_join_threshold": 6,
     "raid_join_window": 10,
     "raid_min_account_age_days": 3,
     "raid_cooldown_seconds": 300,
-
     "nuke_action_threshold": 3,
     "nuke_action_window": 15,
-
     "spam_msg_threshold": 6,
     "spam_msg_window": 7,
     "spam_timeout_seconds": 300,
-
     "slow_spam_duplicate_threshold": 4,
     "slow_spam_window": 120,
     "slow_spam_timeout_seconds": 600,
-
     "raid_channel_spam_threshold": 5,
     "raid_channel_spam_window": 10,
     "raid_softban_delete_seconds": 3600,
-
-    # NEW — Anti Spam Ngắt Quãng (rải 1 đợt -> nghỉ -> rải tiếp, né ngưỡng spam nhanh)
-    "intermittent_spam_burst_size": 3,       # số tin tối thiểu để tính là 1 "đợt rải"
-    "intermittent_spam_burst_gap": 4,        # khoảng cách tối đa (giây) giữa các tin trong CÙNG 1 đợt
-    "intermittent_spam_quiet_gap": 6,        # khoảng lặng tối thiểu (giây) giữa 2 đợt để coi là "ngắt quãng" có chủ đích
-    "intermittent_spam_burst_count": 3,      # cần ít nhất N đợt như vậy mới bị phát hiện
-    "intermittent_spam_window": 180,         # cửa sổ tổng quan sát các đợt
+    "intermittent_spam_burst_size": 3,
+    "intermittent_spam_burst_gap": 4,
+    "intermittent_spam_quiet_gap": 6,
+    "intermittent_spam_burst_count": 3,
+    "intermittent_spam_window": 180,
     "intermittent_spam_timeout_seconds": 900,
-
     "mass_mention_threshold": 6,
     "mass_mention_timeout_seconds": 600,
-
     "invite_new_account_days": 3,
-
     "badwords": [],
     "scam_domains": [],
     "blocked_bot_ids": [],
     "auto_ban_suspicious_bots": True,
-
-    # Điểm nghi ngờ tích lũy — nay có trọng số riêng theo loại vi phạm (xem SUSPICION_WEIGHTS)
     "suspicion_ban_threshold": 100,
     "suspicion_timeout_threshold": 50,
     "suspicion_decay_seconds": 600,
-
     "zalgo_max_combining_chars": 8,
-
     "lockdown_active": False,
-
     "protected_role_ids": [],
     "backup_snapshot_interval_seconds": 1800,
-
-    # NEW — Anti Role Escalation
     "dangerous_perm_names": [
         "administrator", "manage_guild", "manage_roles", "manage_webhooks",
         "manage_channels", "ban_members", "kick_members",
     ],
-    "role_escalation_audit_wait_seconds": 3,  # chờ audit log kịp ghi trước khi tra cứu
-
-    # NEW — Whitelist
+    "role_escalation_audit_wait_seconds": 3,
     "whitelist_user_ids": [],
     "whitelist_role_ids": [],
     "whitelist_bot_ids": [],
     "whitelist_webhook_ids": [],
-
-    # NEW — Anti Token Grabber
     "token_grabber_keywords": [
         "discord_desktop_core", "inject.js", "webhook spammer",
         "password stealer", "token grabber", "token logger",
         "steal token", "grab token",
     ],
-
-    # NEW — Anti Unicode Bypass: các ký tự ẩn cần loại bỏ trước khi lọc từ cấm/mention
-    # (Zero Width Space, ZWJ, ZWNJ, RTL Override — xử lý trong code, không cần cấu hình)
-
-    # NEW — Anti Webhook Spam
     "max_webhooks_per_guild": 15,
     "webhook_create_threshold": 3,
     "webhook_create_window": 30,
-
-    # NEW — Join Pattern Detection (raid tinh vi hơn đếm số lượng)
     "join_pattern_window": 30,
-    "join_pattern_min_count": 4,          # cần ít nhất N joins gần nhau mới xét pattern
-    "join_pattern_name_similarity_ratio": 0.6,  # tỉ lệ % user cùng pattern tên/avatar để coi là khả nghi
-
-    # NEW — Mass Role Grant
+    "join_pattern_min_count": 4,
+    "join_pattern_name_similarity_ratio": 0.6,
     "mass_role_grant_threshold": 5,
     "mass_role_grant_window": 15,
-
-    # NEW — Mass Ban/Kick
     "mass_ban_threshold": 5,
     "mass_ban_window": 10,
     "mass_kick_threshold": 5,
     "mass_kick_window": 10,
-
-    # NEW — Channel Permission Wipe
     "perm_wipe_threshold": 5,
     "perm_wipe_window": 15,
+    "vanity_url_protection": True,
+    "guild_identity_protection": True,
+    "auto_ban_unauthorized_bot_adder": True,
+    "emoji_sticker_nuke_threshold": 4,
+    "emoji_sticker_nuke_window": 15,
+    "automod_delete_threshold": 2,
+    "automod_delete_window": 20,
+    "integration_delete_threshold": 2,
+    "integration_delete_window": 20,
+    "oauth_suspicious_keywords": [
+        "grabber", "nuker", "raid", "selfbot", "token", "stealer", "nitro sniper",
+    ],
+    "adaptive_detection_enabled": True,
+    "adaptive_trusted_action_count": 30,
+    "adaptive_trusted_min_age_days": 14,
+    "adaptive_threshold_multiplier": 1.5,
+    "audit_log_cache_ttl_seconds": 30,
 }
-
 CONFIGURABLE_INT_KEYS = [
     "raid_join_threshold", "raid_join_window", "raid_min_account_age_days", "raid_cooldown_seconds",
     "nuke_action_threshold", "nuke_action_window",
@@ -150,9 +124,12 @@ CONFIGURABLE_INT_KEYS = [
     "mass_role_grant_threshold", "mass_role_grant_window",
     "mass_ban_threshold", "mass_ban_window", "mass_kick_threshold", "mass_kick_window",
     "perm_wipe_threshold", "perm_wipe_window",
+    "emoji_sticker_nuke_threshold", "emoji_sticker_nuke_window",
+    "automod_delete_threshold", "automod_delete_window",
+    "integration_delete_threshold", "integration_delete_window",
+    "adaptive_trusted_action_count", "adaptive_trusted_min_age_days",
+    "audit_log_cache_ttl_seconds",
 ]
-
-# NEW: trọng số điểm nghi ngờ theo loại vi phạm (thay vì cộng cố định)
 SUSPICION_WEIGHTS = {
     "badword": 10,
     "zalgo": 15,
@@ -169,172 +146,163 @@ SUSPICION_WEIGHTS = {
     "token_grabber": 70,
     "webhook_spam": 50,
     "perm_wipe": 90,
+    "vanity_hijack": 100,
+    "guild_identity": 85,
+    "unauthorized_bot_add": 90,
+    "emoji_sticker_nuke": 70,
+    "automod_delete": 75,
+    "integration_delete": 75,
+    "oauth_suspicious": 60,
+    "selfbot": 40,
 }
-
 SUSPICIOUS_BOT_NAME_PATTERN = re.compile(
     r"^(none|null|undefined|nan|unknown)$", re.IGNORECASE
 )
-
 URL_SHORTENERS = {
     "bit.ly", "tinyurl.com", "t.co", "is.gd", "cutt.ly", "shorturl.at",
     "rebrand.ly", "grabify.link", "iplogger.org", "ow.ly",
 }
-
 TRUSTED_BRAND_DOMAINS = ["discord.com", "discord.gg", "discordapp.com", "steamcommunity.com"]
-
-# NEW: các domain redirect phổ biến — cần unwrap trước khi kiểm tra domain cuối
 REDIRECT_DOMAINS = {
     "bit.ly", "tinyurl.com", "t.co", "is.gd", "cutt.ly", "shorturl.at",
     "rebrand.ly", "ow.ly", "buff.ly", "shorte.st", "adf.ly",
 }
-
 if os.path.exists(SETTINGS_FILE):
     with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
         settings = json.load(f)
 else:
     settings = {}
-
 if os.path.exists(BACKUP_FILE):
     with open(BACKUP_FILE, "r", encoding="utf-8") as f:
         backups = json.load(f)
 else:
     backups = {}
-
 if os.path.exists(STATS_FILE):
     with open(STATS_FILE, "r", encoding="utf-8") as f:
         stats = json.load(f)
 else:
     stats = {}
-
-
 def cfg(guild_id: int) -> dict:
     g = settings.setdefault(str(guild_id), {})
     merged = {**DEFAULTS, **g}
     settings[str(guild_id)] = merged
     return merged
-
-
 def _save_sync():
     tmp = SETTINGS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
     os.replace(tmp, SETTINGS_FILE)
-
-
 def _save_backup_sync():
     tmp = BACKUP_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(backups, f, indent=2, ensure_ascii=False)
     os.replace(tmp, BACKUP_FILE)
-
-
 def _save_stats_sync():
     tmp = STATS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
     os.replace(tmp, STATS_FILE)
-
-
 async def save():
     try:
         await asyncio.to_thread(_save_sync)
     except OSError:
         logger.exception("Không thể lưu settings.json")
-
-
 async def save_backup():
     try:
         await asyncio.to_thread(_save_backup_sync)
     except OSError:
         logger.exception("Không thể lưu backup.json")
-
-
 async def save_stats():
     try:
         await asyncio.to_thread(_save_stats_sync)
     except OSError:
         logger.exception("Không thể lưu stats.json")
-
-
 async def set_and_save(guild_id: int, key: str, value) -> None:
     s = cfg(guild_id)
     s[key] = value
     settings[str(guild_id)] = s
     await save()
-
-
-# ------------------------------------------------------- NEW: thống kê ----
 def _today_key() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m-%d")
-
-
 def bump_stat(guild_id: int, metric: str, amount: int = 1):
-    """Cộng dồn thống kê theo ngày cho 1 guild. Không await để gọi được ở bất kỳ đâu; lưu định kỳ."""
     g = stats.setdefault(str(guild_id), {})
     day = g.setdefault(_today_key(), {})
     day[metric] = day.get(metric, 0) + amount
-
-
 async def stats_save_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
         await asyncio.sleep(60)
         await save_stats()
-
-
-# ---------------------------------------------------------------- bot ------
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.bans = True
 intents.moderation = True
-
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 bot.start_time = time.time()
-
 recent_joins = defaultdict(deque)
-recent_join_members = defaultdict(deque)  # NEW: lưu (ts, member) để phân tích pattern join
+recent_join_members = defaultdict(deque)
 recent_nuke_actions = defaultdict(deque)
 recent_messages = defaultdict(deque)
 recent_message_contents = defaultdict(deque)
-message_timeline = defaultdict(deque)  # NEW: (guild_id, user_id) -> deque[ts] toàn bộ tin, để phát hiện spam ngắt quãng (rải-nghỉ-rải)
+message_timeline = defaultdict(deque)
 raid_state = {}
-
 suspicion_scores: dict[tuple[int, int], list] = {}
 _webhook_cache: dict[str, discord.Webhook] = {}
-
-# NEW: theo dõi hành vi mod-abuse
-recent_role_grants = defaultdict(deque)     # (guild_id, actor_id) -> deque[ts]  (cấp role hàng loạt)
-recent_bans = defaultdict(deque)            # guild_id -> deque[(ts, actor_id)]
-recent_kicks = defaultdict(deque)           # guild_id -> deque[(ts, actor_id)]
-recent_perm_updates = defaultdict(deque)    # (guild_id, actor_id) -> deque[ts] (sửa quyền channel hàng loạt)
-recent_webhook_creates = defaultdict(deque)  # (guild_id, actor_id) -> deque[ts]
-
-
+recent_role_grants = defaultdict(deque)
+recent_bans = defaultdict(deque)
+recent_kicks = defaultdict(deque)
+recent_perm_updates = defaultdict(deque)
+recent_webhook_creates = defaultdict(deque)
+recent_emoji_sticker_actions = defaultdict(deque)
+recent_automod_deletes = defaultdict(deque)
+recent_integration_deletes = defaultdict(deque)
+processed_audit_entries: dict[int, float] = {}
+guild_identity_snapshot: dict[int, dict] = {}
+actor_clean_action_count: dict[tuple[int, int], int] = defaultdict(int)
 def _prune_empty(d: defaultdict, key):
     if key in d and not d[key]:
         del d[key]
-
-
+def _audit_entry_already_processed(entry_id: int, ttl_seconds: int) -> bool:
+    now = time.time()
+    if len(processed_audit_entries) > 500:
+        stale = [k for k, ts in processed_audit_entries.items() if now - ts > ttl_seconds]
+        for k in stale:
+            del processed_audit_entries[k]
+    last_ts = processed_audit_entries.get(entry_id)
+    if last_ts is not None and now - last_ts <= ttl_seconds:
+        return True
+    processed_audit_entries[entry_id] = now
+    return False
+def is_actor_adaptively_trusted(guild: discord.Guild, actor, member, s: dict) -> bool:
+    if not s.get("adaptive_detection_enabled", True):
+        return False
+    if member is None or not isinstance(member, discord.Member):
+        return False
+    key = (guild.id, actor.id)
+    clean_count = actor_clean_action_count.get(key, 0)
+    if clean_count < s.get("adaptive_trusted_action_count", 30):
+        return False
+    joined_at = member.joined_at
+    if joined_at is None:
+        return False
+    age_days = (discord.utils.utcnow() - joined_at).days
+    if age_days < s.get("adaptive_trusted_min_age_days", 14):
+        return False
+    return True
+def note_clean_actor_action(guild_id: int, actor_id: int):
+    actor_clean_action_count[(guild_id, actor_id)] += 1
+def adaptive_threshold(base_threshold: int, guild: discord.Guild, actor, member, s: dict) -> int:
+    if is_actor_adaptively_trusted(guild, actor, member, s):
+        return max(base_threshold, int(round(base_threshold * s.get("adaptive_threshold_multiplier", 1.5))))
+    return base_threshold
 def detect_intermittent_spam(items: list, s: dict):
-    """
-    NEW: Phát hiện kiểu spam "rải 1 đợt -> ngắt (nghỉ tay) -> rải tiếp -> ngắt -> rải tiếp..."
-    Đây là chiêu né spam_msg_threshold: mỗi đợt cố tình rải ít hơn ngưỡng, rồi dừng vài giây
-    trước khi rải đợt kế tiếp để bucket spam nhanh không bao giờ đầy.
-
-    items: danh sách (ts, message) đã sort theo ts tăng dần, trong phạm vi intermittent_spam_window.
-    Trả về danh sách các "đợt" (burst) hợp lệ — mỗi đợt là list[(ts, message)] — nếu phát hiện
-    pattern, ngược lại None.
-    """
     if not items:
         return None
-
     burst_gap = s["intermittent_spam_burst_gap"]
     burst_size = s["intermittent_spam_burst_size"]
     quiet_gap = s["intermittent_spam_quiet_gap"]
     burst_count = s["intermittent_spam_burst_count"]
-
-    # Gom cụm: các tin cách nhau <= burst_gap được coi là cùng 1 đợt rải
     clusters = []
     current = [items[0]]
     for item in items[1:]:
@@ -344,59 +312,80 @@ def detect_intermittent_spam(items: list, s: dict):
             clusters.append(current)
             current = [item]
     clusters.append(current)
-
-    # Chỉ giữ các cụm đủ lớn để tính là 1 "đợt rải" thật sự
     bursts = [c for c in clusters if len(c) >= burst_size]
     if len(bursts) < burst_count:
         return None
-
-    # Giữa các đợt phải có khoảng lặng rõ ràng (chủ đích nghỉ để né bộ lọc),
-    # nếu không thì đó chỉ là spam nhanh bình thường, đã có bộ lọc riêng xử lý.
     valid_gaps = sum(
         1 for i in range(1, len(bursts))
         if bursts[i][0][0] - bursts[i - 1][-1][0] >= quiet_gap
     )
-
     if valid_gaps >= burst_count - 1:
         return bursts
     return None
-
-
 SCAM_PATTERN = re.compile(
     r"discord\W?nitro|dlscord|discrod|discocl|steamcommunlty|steamcommunnity|free.?nitro",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"https?://([^\s/]+)(/[^\s]*)?", re.IGNORECASE)
 INVITE_RE = re.compile(r"(?:discord\.gg|discord(?:app)?\.com/invite)/([a-z0-9-]+)", re.IGNORECASE)
-
 LEET_MAP = str.maketrans({
     "4": "a", "@": "a", "3": "e", "1": "i", "!": "i", "|": "i",
     "0": "o", "5": "s", "$": "s", "7": "t", "+": "t", "8": "b",
     "9": "g",
 })
 VN_MAP = str.maketrans({"đ": "d", "Đ": "d"})
-
 SHORT_WORD_BOUNDARY_LEN = 4
-
-# NEW: các ký tự ẩn/định dạng thường dùng để lách filter (zero-width, RTL override...)
 INVISIBLE_CHARS_RE = re.compile(
     "["
-    "\u200b"   # Zero Width Space
-    "\u200c"   # Zero Width Non-Joiner
-    "\u200d"   # Zero Width Joiner
-    "\u2060"   # Word Joiner
-    "\ufeff"   # BOM / Zero Width No-Break Space
-    "\u202a-\u202e"  # LRE, RLE, PDF, LRO, RLO (bidi override)
-    "\u2066-\u2069"  # LRI, RLI, FSI, PDI (bidi isolate)
+    "\u200b"
+    "\u200c"
+    "\u200d"
+    "\u2060"
+    "\ufeff"
+    "\u202a-\u202e"
+    "\u2066-\u2069"
     "]"
 )
-
-
 def strip_invisible_chars(text: str) -> str:
-    """Loại bỏ zero-width chars và RTL/LTR override để tránh bị dùng lách filter từ cấm/@everyone."""
     return INVISIBLE_CHARS_RE.sub("", text)
-
-
+MORSE_TABLE = {
+    ".-": "a", "-...": "b", "-.-.": "c", "-..": "d", ".": "e", "..-.": "f",
+    "--.": "g", "....": "h", "..": "i", ".---": "j", "-.-": "k", ".-..": "l",
+    "--": "m", "-.": "n", "---": "o", ".--.": "p", "--.-": "q", ".-.": "r",
+    "...": "s", "-": "t", "..-": "u", "...-": "v", ".--": "w", "-..-": "x",
+    "-.--": "y", "--..": "z",
+    "-----": "0", ".----": "1", "..---": "2", "...--": "3", "....-": "4",
+    ".....": "5", "-....": "6", "--...": "7", "---..": "8", "----.": "9",
+}
+MORSE_CHAR_RE = re.compile(r"^[.\-\s/]+$")
+def looks_like_morse(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 6:
+        return False
+    if not MORSE_CHAR_RE.match(stripped):
+        return False
+    tokens = [t for t in re.split(r"[\s/]+", stripped) if t]
+    return len(tokens) >= 3
+def decode_morse(text: str) -> str | None:
+    stripped = text.strip()
+    words = stripped.split("/")
+    decoded_words = []
+    total_tokens = 0
+    failed_tokens = 0
+    for word in words:
+        tokens = word.split()
+        letters = []
+        for tok in tokens:
+            total_tokens += 1
+            letter = MORSE_TABLE.get(tok)
+            if letter:
+                letters.append(letter)
+            else:
+                failed_tokens += 1
+        decoded_words.append("".join(letters))
+    if total_tokens == 0 or failed_tokens / total_tokens > 0.3:
+        return None
+    return " ".join(w for w in decoded_words if w).strip()
 def normalize(text: str) -> str:
     text = strip_invisible_chars(text)
     text = text.lower()
@@ -405,19 +394,14 @@ def normalize(text: str) -> str:
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     text = text.translate(LEET_MAP)
     return text
-
-
 def _strip_non_alnum(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", "", text)
     text = re.sub(r"(.)\1+", r"\1", text)
     return text
-
-
 def contains_badword(content: str, badwords: list[str]) -> str | None:
     base = normalize(content)
     spaced = _strip_non_alnum(base)
     squashed = re.sub(r"\s+", "", spaced)
-
     for w in badwords:
         norm_word = normalize(w)
         norm_word = re.sub(r"[^a-z0-9]", "", norm_word)
@@ -431,15 +415,10 @@ def contains_badword(content: str, badwords: list[str]) -> str | None:
             if norm_word in squashed:
                 return w
     return None
-
-
 def normalize_for_dedupe(content: str) -> str:
     text = strip_invisible_chars(content).strip().lower()
     text = re.sub(r"\s+", " ", text)
     return text
-
-
-# ------------------------------------------------------- typosquat --------
 def _levenshtein(a: str, b: str) -> int:
     if a == b:
         return 0
@@ -455,8 +434,6 @@ def _levenshtein(a: str, b: str) -> int:
             cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
         prev = cur
     return prev[-1]
-
-
 def looks_like_typosquat(host: str) -> str | None:
     host = host.lower()
     for brand in TRUSTED_BRAND_DOMAINS:
@@ -466,25 +443,13 @@ def looks_like_typosquat(host: str) -> str | None:
         if 0 < dist <= 2 and len(host) >= len(brand) - 3:
             return brand
     return None
-
-
 def is_shortener(host: str) -> bool:
     return host.lower() in URL_SHORTENERS
-
-
-# ------------------------------------------------------- zalgo ------------
 def count_combining_chars(text: str) -> int:
     return sum(1 for c in text if unicodedata.category(c) == "Mn")
-
-
 def is_zalgo(text: str, max_combining: int) -> bool:
     return count_combining_chars(text) > max_combining
-
-
-# ------------------------------------------------------- NEW: redirect unwrap
 async def unwrap_redirect(url: str, max_hops: int = 3) -> str:
-    """Theo chuỗi redirect (HEAD request) để lấy domain đích thật, dùng cho anti fake-nitro nâng cao.
-    Trả về URL cuối cùng (hoặc URL gốc nếu lỗi/không redirect)."""
     current = url
     try:
         import aiohttp
@@ -495,7 +460,7 @@ async def unwrap_redirect(url: str, max_hops: int = 3) -> str:
                         if resp.status in (301, 302, 303, 307, 308) and "Location" in resp.headers:
                             nxt = resp.headers["Location"]
                             if nxt.startswith("/"):
-                                break  # relative redirect, không đủ thông tin domain -> dừng
+                                break
                             current = nxt
                         else:
                             break
@@ -504,32 +469,21 @@ async def unwrap_redirect(url: str, max_hops: int = 3) -> str:
     except ImportError:
         logger.warning("aiohttp không sẵn có — bỏ qua unwrap redirect")
     return current
-
-
-# ------------------------------------------------------- NEW: whitelist ---
 def is_whitelisted_user(guild_id: int, user_id: int) -> bool:
     s = cfg(guild_id)
     return user_id in set(s.get("whitelist_user_ids", []))
-
-
 def is_whitelisted_member_by_role(guild_id: int, member: discord.Member) -> bool:
     s = cfg(guild_id)
     wl_roles = set(s.get("whitelist_role_ids", []))
     if not wl_roles:
         return False
     return any(r.id in wl_roles for r in member.roles)
-
-
 def is_whitelisted_bot(guild_id: int, bot_id: int) -> bool:
     s = cfg(guild_id)
     return bot_id in set(s.get("whitelist_bot_ids", []))
-
-
 def is_whitelisted_webhook(guild_id: int, webhook_id: int) -> bool:
     s = cfg(guild_id)
     return webhook_id in set(s.get("whitelist_webhook_ids", []))
-
-
 def is_protected(member: discord.abc.User, guild_id: int | None = None) -> bool:
     if member.id in OWNER_IDS:
         return True
@@ -542,11 +496,7 @@ def is_protected(member: discord.abc.User, guild_id: int | None = None) -> bool:
     if guild_id is not None and is_whitelisted_member_by_role(guild_id, member):
         return True
     return member.guild_permissions.administrator
-
-
-# ------------------------------------------------------- suspicion --------
 def add_suspicion(guild_id: int, user_id: int, category: str, decay_seconds: int) -> int:
-    """Cộng điểm nghi ngờ theo trọng số của category (xem SUSPICION_WEIGHTS), có decay theo thời gian."""
     points = SUSPICION_WEIGHTS.get(category, 10)
     key = (guild_id, user_id)
     now = time.time()
@@ -555,26 +505,19 @@ def add_suspicion(guild_id: int, user_id: int, category: str, decay_seconds: int
         score, last_ts = 0.0, now
     else:
         score, last_ts = entry
-
     if decay_seconds > 0:
         elapsed = now - last_ts
         decay = (elapsed / decay_seconds) * 10
         score = max(0.0, score - decay)
-
     score += points
     suspicion_scores[key] = [score, now]
     return int(score)
-
-
 def cleanup_suspicion_scores(max_age_seconds: int = 3600):
     now = time.time()
     stale = [k for k, (_, ts) in suspicion_scores.items() if now - ts > max_age_seconds]
     for k in stale:
         del suspicion_scores[k]
-
-
 async def apply_suspicion_consequence(guild: discord.Guild, member: discord.Member, score: int, s: dict):
-    """Áp dụng hậu quả (timeout/ban) khi điểm nghi ngờ vượt ngưỡng."""
     if score >= s["suspicion_ban_threshold"]:
         await safe_action(member.ban(reason=f"Suspicion score vượt ngưỡng ({score})"), action_name="ban high suspicion user", guild_id=guild.id)
         bump_stat(guild.id, "ban", 1)
@@ -584,9 +527,6 @@ async def apply_suspicion_consequence(guild: discord.Guild, member: discord.Memb
         await safe_action(member.timeout(until, reason=f"Suspicion score cao ({score})"), action_name="timeout high suspicion user", guild_id=guild.id)
         bump_stat(guild.id, "timeout", 1)
         await log(guild, f"⏱️ {member.mention} bị timeout do điểm nghi ngờ cao (**{score}** điểm)", discord.Color.orange())
-
-
-# ------------------------------------------------------- webhook log ------
 async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
     if url in _webhook_cache:
         return _webhook_cache[url]
@@ -597,14 +537,11 @@ async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
     except (ValueError, discord.HTTPException):
         logger.warning("Webhook URL không hợp lệ")
         return None
-
-
 async def log(guild: discord.Guild, text: str, color=discord.Color.blurple(), *, critical: bool = False):
     s = cfg(guild.id)
     embed = discord.Embed(description=text, color=color, timestamp=discord.utils.utcnow())
     if critical:
         embed.set_footer(text="⚠️ SỰ CỐ NGHIÊM TRỌNG")
-
     sent = False
     if s.get("log_webhook_url"):
         wh = await get_log_webhook(s["log_webhook_url"])
@@ -614,7 +551,6 @@ async def log(guild: discord.Guild, text: str, color=discord.Color.blurple(), *,
                 sent = True
             except discord.HTTPException:
                 logger.exception("Gửi log qua webhook thất bại ở guild %s", guild.id)
-
     if not sent and s["log_channel_id"]:
         channel = guild.get_channel(s["log_channel_id"])
         if channel is None:
@@ -627,11 +563,8 @@ async def log(guild: discord.Guild, text: str, color=discord.Color.blurple(), *,
                 logger.warning("Thiếu quyền gửi tin nhắn vào log channel ở guild %s", guild.id)
             except discord.HTTPException:
                 logger.exception("Gửi log thất bại ở guild %s", guild.id)
-
     if critical and s.get("alert_owner_on_critical", True):
         await alert_owners(guild, text)
-
-
 async def alert_owners(guild: discord.Guild, text: str):
     for owner_id in OWNER_IDS:
         user = bot.get_user(owner_id)
@@ -643,8 +576,6 @@ async def alert_owners(guild: discord.Guild, text: str):
             await user.send(f"🚨 **[{guild.name}]** {text}")
         except discord.HTTPException:
             logger.warning("Không thể DM owner %s", owner_id)
-
-
 async def safe_action(coro, *, action_name: str, guild_id: int | None = None):
     try:
         return await coro
@@ -653,8 +584,6 @@ async def safe_action(coro, *, action_name: str, guild_id: int | None = None):
     except discord.HTTPException:
         logger.exception("Lỗi HTTP khi thực hiện '%s' (guild=%s)", action_name, guild_id)
     return None
-
-
 async def softban(guild: discord.Guild, user: discord.abc.Snowflake, reason: str, delete_seconds: int = 3600):
     banned = await safe_action(
         guild.ban(user, reason=reason, delete_message_seconds=delete_seconds),
@@ -667,11 +596,7 @@ async def softban(guild: discord.Guild, user: discord.abc.Snowflake, reason: str
         guild_id=guild.id,
     )
     return banned is not None
-
-
-# ------------------------------------------------------- backup -----------
 async def snapshot_guild(guild: discord.Guild):
-    """Lưu snapshot đầy đủ: roles, channels (kèm category + overwrite) để phục hồi sau nuke."""
     roles_data = []
     for role in guild.roles:
         if role.is_default():
@@ -685,7 +610,6 @@ async def snapshot_guild(guild: discord.Guild):
             "mentionable": role.mentionable,
             "position": role.position,
         })
-
     categories_data = []
     for cat in guild.categories:
         categories_data.append({
@@ -693,7 +617,6 @@ async def snapshot_guild(guild: discord.Guild):
             "name": cat.name,
             "position": cat.position,
         })
-
     channels_data = []
     for channel in guild.channels:
         if isinstance(channel, discord.CategoryChannel):
@@ -714,7 +637,6 @@ async def snapshot_guild(guild: discord.Guild):
             "topic": getattr(channel, "topic", None),
             "overwrites": overwrites,
         })
-
     backups[str(guild.id)] = {
         "timestamp": time.time(),
         "roles": roles_data,
@@ -722,8 +644,6 @@ async def snapshot_guild(guild: discord.Guild):
         "channels": channels_data,
     }
     await save_backup()
-
-
 async def backup_snapshot_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -733,15 +653,12 @@ async def backup_snapshot_loop():
             if time.time() - last >= s["backup_snapshot_interval_seconds"]:
                 await snapshot_guild(guild)
         await asyncio.sleep(300)
-
-
 async def restore_roles(guild: discord.Guild, data: dict) -> int:
-    """Khôi phục role bị xóa (theo tên+id không còn tồn tại) và sửa quyền role hiện có bị đổi khác backup."""
     existing_ids = {r.id for r in guild.roles}
     restored = 0
     for r in data["roles"]:
         if r["id"] in existing_ids:
-            continue  # role vẫn còn, không cần tạo lại (tránh trùng tên)
+            continue
         new_role = await safe_action(
             guild.create_role(
                 name=r["name"],
@@ -756,12 +673,9 @@ async def restore_roles(guild: discord.Guild, data: dict) -> int:
         )
         if new_role:
             restored += 1
-        await asyncio.sleep(0.5)  # tránh rate-limit khi khôi phục nhiều role liên tiếp
+        await asyncio.sleep(0.5)
     return restored
-
-
 async def restore_categories(guild: discord.Guild, data: dict) -> dict:
-    """Khôi phục category bị xóa. Trả về map old_category_id -> new_category object để dùng khi restore channel."""
     existing_ids = {c.id for c in guild.categories}
     id_map = {}
     for cat in sorted(data.get("categories", []), key=lambda c: c["position"]):
@@ -776,24 +690,18 @@ async def restore_categories(guild: discord.Guild, data: dict) -> dict:
             id_map[cat["id"]] = new_cat
         await asyncio.sleep(0.5)
     return id_map
-
-
 async def restore_channels(guild: discord.Guild, data: dict, category_map: dict) -> int:
-    """Khôi phục channel bị xóa (text/voice) kèm permission overwrite."""
     existing_ids = {c.id for c in guild.channels}
     role_by_id = {r.id: r for r in guild.roles}
     restored = 0
-
     for ch in sorted(data["channels"], key=lambda c: c["position"]):
         if ch["id"] in existing_ids:
             continue
-
         category = None
         if ch["category_id"] and ch["category_id"] in category_map:
             category = category_map[ch["category_id"]]
         elif ch["category_id"]:
             category = guild.get_channel(ch["category_id"])
-
         overwrites = {}
         for target_id_str, ow in ch.get("overwrites", {}).items():
             target_id = int(target_id_str)
@@ -806,24 +714,18 @@ async def restore_channels(guild: discord.Guild, data: dict, category_map: dict)
                 target = guild.get_member(target_id)
             if target:
                 overwrites[target] = perm_ow
-
         kwargs = {"name": ch["name"], "category": category, "overwrites": overwrites, "reason": "Auto-restore sau nuke"}
         if ch["type"] == "text" and ch.get("topic"):
             kwargs["topic"] = ch["topic"]
-
         new_channel = None
         if ch["type"] == "voice":
             new_channel = await safe_action(guild.create_voice_channel(**kwargs), action_name="restore voice channel", guild_id=guild.id)
         else:
             new_channel = await safe_action(guild.create_text_channel(**kwargs), action_name="restore text channel", guild_id=guild.id)
-
         if new_channel:
             restored += 1
         await asyncio.sleep(0.5)
     return restored
-
-
-# ------------------------------------------------------- cleanup ----------
 async def cleanup_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -853,9 +755,6 @@ async def cleanup_loop():
             for k in stale_keys:
                 del d[k]
         await asyncio.sleep(900)
-
-
-# ---------------------------------------------------------------- events ---
 @bot.event
 async def on_ready():
     logger.info("Logged in as %s", bot.user)
@@ -864,8 +763,14 @@ async def on_ready():
         logger.info("Đã sync %d slash command(s)", len(synced))
     except Exception:
         logger.exception("Sync slash command lỗi")
-
-
+    for guild in bot.guilds:
+        guild_identity_snapshot[guild.id] = {
+            "name": guild.name,
+            "icon": guild.icon.key if guild.icon else None,
+            "banner": guild.banner.key if guild.banner else None,
+            "vanity": getattr(guild, "vanity_url_code", None),
+            "verification_level": str(guild.verification_level),
+        }
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
@@ -880,8 +785,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
         pass
-
-
 def _is_suspicious_bot(member: discord.Member) -> str | None:
     if not member.bot:
         return None
@@ -892,53 +795,30 @@ def _is_suspicious_bot(member: discord.Member) -> str | None:
     if SUSPICIOUS_BOT_NAME_PATTERN.match(name) or SUSPICIOUS_BOT_NAME_PATTERN.match(global_name):
         return "tên hiển thị 'None/null/undefined'"
     return None
-
-
 def _is_discord_verified_bot(member: discord.Member) -> bool:
-    """
-    NEW: True nếu bot/app có huy hiệu ✓ (Verified) do CHÍNH Discord cấp sau khi review
-    (member.public_flags.verified_bot). Cờ này đến thẳng từ Discord API, không thể giả mạo
-    qua tên/avatar, nên có thể tin tưởng để loại trừ khỏi mọi bước nghi ngờ/raid bên dưới.
-    """
     if not member.bot:
         return False
     flags = getattr(member, "public_flags", None)
     return bool(flags and getattr(flags, "verified_bot", False))
-
-
-# ------------------------------------------------------- Join Pattern -----
 def _username_looks_random(name: str) -> bool:
-    """Heuristic đơn giản: username toàn số, hoặc chuỗi ký tự+số vô nghĩa kiểu 'xk29fj1'."""
     name = name.lower()
-    if re.fullmatch(r"[a-z]*\d{4,}", name):  # kiểu user1234567
+    if re.fullmatch(r"[a-z]*\d{4,}", name):
         return True
     if re.fullmatch(r"[a-z0-9]{6,}", name) and sum(c.isdigit() for c in name) >= 3:
         return True
     return False
-
-
 async def analyze_join_pattern(guild: discord.Guild, s: dict) -> str | None:
-    """Phân tích các join gần đây để tìm dấu hiệu raid tinh vi: tên/avatar giống nhau,
-    tài khoản tạo cùng thời điểm, username ngẫu nhiên hàng loạt. Trả về mô tả nếu khả nghi."""
     now = time.time()
     bucket = recent_join_members[guild.id]
     while bucket and now - bucket[0][0] > s["join_pattern_window"]:
         bucket.popleft()
-
     if len(bucket) < s["join_pattern_min_count"]:
         return None
-
     members = [m for _, m in bucket]
     total = len(members)
-
-    # Cùng avatar hash (hoặc đều không có avatar custom)
     avatar_hashes = Counter(m.avatar.key if m.avatar else "default" for m in members)
     most_common_avatar, avatar_count = avatar_hashes.most_common(1)[0]
-
-    # Username theo pattern ngẫu nhiên
     random_name_count = sum(1 for m in members if _username_looks_random(m.name))
-
-    # Tài khoản tạo cùng khoảng thời gian ngắn (trong vòng 1 giờ với nhau)
     creation_times = sorted(m.created_at.timestamp() for m in members)
     close_creation_count = 1
     max_close = 1
@@ -948,7 +828,6 @@ async def analyze_join_pattern(guild: discord.Guild, s: dict) -> str | None:
             max_close = max(max_close, close_creation_count)
         else:
             close_creation_count = 1
-
     ratio = s["join_pattern_name_similarity_ratio"]
     reasons = []
     if avatar_count / total >= ratio and most_common_avatar != "default":
@@ -957,26 +836,20 @@ async def analyze_join_pattern(guild: discord.Guild, s: dict) -> str | None:
         reasons.append(f"{random_name_count}/{total} username dạng ngẫu nhiên")
     if max_close / total >= ratio:
         reasons.append(f"{max_close}/{total} tài khoản được tạo gần cùng thời điểm")
-
     if reasons:
         return "; ".join(reasons)
     return None
-
-
 @bot.event
 async def on_member_join(member: discord.Member):
     guild = member.guild
     s = cfg(guild.id)
-
     if is_whitelisted_user(guild.id, member.id) or is_whitelisted_member_by_role(guild.id, member):
         return
-
     if s.get("lockdown_active"):
         account_age = (discord.utils.utcnow() - member.created_at).days
         if account_age < s["raid_min_account_age_days"]:
             await safe_action(member.kick(reason="Lockdown: tài khoản quá mới"), action_name="kick during lockdown", guild_id=guild.id)
             return
-
     if member.bot:
         if is_whitelisted_bot(guild.id, member.id):
             return
@@ -989,18 +862,13 @@ async def on_member_join(member: discord.Member):
             await log(guild, f"🤖⛔ Đã ban bot bị chặn `{member.id}` (`{member}`)", discord.Color.dark_red())
             bump_stat(guild.id, "bot_banned", 1)
             return
-
         if _is_discord_verified_bot(member):
-            # NEW: Bot/app có huy hiệu ✓ (Verified) do Discord xác minh -> tin tưởng, bỏ qua
-            # toàn bộ kiểm tra nghi ngờ tên/raid bên dưới (kể cả kick do "tài khoản quá mới lúc raid").
-            # Không áp dụng cho bot nằm trong blocked_bot_ids ở trên — blocklist tay vẫn được ưu tiên.
             await log(
                 guild,
                 f"🤖✅ Bot đã xác minh (Verified ✓) `{member}` (`{member.id}`) tham gia — bỏ qua kiểm tra nghi ngờ/raid.",
                 discord.Color.green(),
             )
             return
-
         if s.get("auto_ban_suspicious_bots", True):
             reason = _is_suspicious_bot(member)
             if reason:
@@ -1012,17 +880,13 @@ async def on_member_join(member: discord.Member):
                 await log(guild, f"🤖⛔ Đã ban bot khả nghi `{member.id}` — lý do: {reason}", discord.Color.dark_red())
                 bump_stat(guild.id, "bot_banned", 1)
                 return
-
     now = time.time()
     joins = recent_joins[guild.id]
     joins.append(now)
     while joins and now - joins[0] > s["raid_join_window"]:
         joins.popleft()
-
     recent_join_members[guild.id].append((now, member))
-
     account_age = (discord.utils.utcnow() - member.created_at).days
-
     if len(joins) >= s["raid_join_threshold"]:
         state = raid_state.get(guild.id)
         if not state or not state.get("active"):
@@ -1044,15 +908,12 @@ async def on_member_join(member: discord.Member):
             bump_stat(guild.id, "raid_blocked", 1)
         else:
             state["last_seen"] = now
-
         if account_age < s["raid_min_account_age_days"]:
             await safe_action(
                 member.kick(reason="Anti-raid: tài khoản quá mới trong lúc raid"),
                 action_name="kick new account during raid",
                 guild_id=guild.id,
             )
-
-    # NEW: Join Pattern Detection — phát hiện raid tinh vi dù chưa đạt ngưỡng số lượng thô
     pattern_reason = await analyze_join_pattern(guild, s)
     if pattern_reason:
         await log(
@@ -1063,8 +924,6 @@ async def on_member_join(member: discord.Member):
             critical=True,
         )
         bump_stat(guild.id, "raid_blocked", 1)
-
-
 async def raid_cooldown_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -1087,49 +946,34 @@ async def raid_cooldown_loop():
                     await log(guild, "✅ Raid đã lắng xuống — verification level đã trở về mức cũ.", discord.Color.green())
                 state["active"] = False
         await asyncio.sleep(30)
-
-
-# ------------------------------------------------------- NEW: Anti Role Escalation
 DANGEROUS_PERMS_ATTRS = [
     "administrator", "manage_guild", "manage_roles", "manage_webhooks",
     "manage_channels", "ban_members", "kick_members",
 ]
-
-
 def _role_has_dangerous_perms(role: discord.Role, dangerous_names: list[str]) -> list[str]:
     hits = []
     for name in dangerous_names:
         if getattr(role.permissions, name, False):
             hits.append(name)
     return hits
-
-
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     guild = after.guild
     s = cfg(guild.id)
-
     added_roles = [r for r in after.roles if r not in before.roles]
     if not added_roles:
         return
-
     dangerous_names = s.get("dangerous_perm_names", DANGEROUS_PERMS_ATTRS)
     dangerous_added = []
     for role in added_roles:
         hits = _role_has_dangerous_perms(role, dangerous_names)
         if hits:
             dangerous_added.append((role, hits))
-
     if not dangerous_added:
         return
-
-    # Bỏ qua nếu chính chủ được whitelist (admin gốc tự thao tác vẫn nên biết nhưng không xử lý)
     if is_protected(after, guild.id):
         return
-
-    # Chờ 1 chút để audit log kịp ghi nhận actor
     await asyncio.sleep(s.get("role_escalation_audit_wait_seconds", 3))
-
     actor = None
     try:
         async for entry in guild.audit_logs(action=discord.AuditLogAction.member_role_update, limit=5):
@@ -1138,25 +982,18 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 break
     except discord.Forbidden:
         logger.warning("Thiếu quyền View Audit Log để xác định người cấp role ở guild %s", guild.id)
-
     actor_member = guild.get_member(actor.id) if actor else None
     actor_authorized = actor and (is_protected(actor, guild.id) if actor_member is None else is_protected(actor_member, guild.id))
-
     role_names = ", ".join(r.name for r, _ in dangerous_added)
-
     if actor_authorized:
-        # Người cấp hợp lệ (admin/whitelist) — chỉ log thông tin, không thu hồi
         await log(guild, f"ℹ️ {after.mention} được cấp role nguy hiểm ({role_names}) bởi {actor.mention if actor else 'không rõ'} (đã xác thực quyền hợp lệ)", discord.Color.blurple())
         return
-
-    # Người cấp KHÔNG hợp lệ hoặc không xác định được -> coi là leo thang quyền trái phép
     await safe_action(
         after.remove_roles(*[r for r, _ in dangerous_added], reason="Anti Role Escalation: cấp quyền nguy hiểm trái phép"),
         action_name="remove escalated roles",
         guild_id=guild.id,
     )
     bump_stat(guild.id, "role_escalation_blocked", 1)
-
     if actor and actor.id != bot.user.id:
         await safe_action(
             guild.ban(actor, reason="Anti Role Escalation: cấp quyền nguy hiểm trái phép cho thành viên khác"),
@@ -1179,9 +1016,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             discord.Color.dark_red(),
             critical=True,
         )
-
-
-# ------------------------------------------------------- audit log --------
 WATCHED_ACTIONS = {
     discord.AuditLogAction.channel_delete,
     discord.AuditLogAction.channel_create,
@@ -1197,15 +1031,21 @@ WATCHED_ACTIONS = {
     discord.AuditLogAction.emoji_delete,
     discord.AuditLogAction.integration_create,
     discord.AuditLogAction.guild_update,
+    discord.AuditLogAction.bot_add,
+    discord.AuditLogAction.sticker_delete,
+    discord.AuditLogAction.automod_rule_delete,
+    discord.AuditLogAction.integration_delete,
 }
-
 CRITICAL_ACTIONS = {
     discord.AuditLogAction.channel_delete,
     discord.AuditLogAction.role_delete,
     discord.AuditLogAction.webhook_create,
+    discord.AuditLogAction.bot_add,
+    discord.AuditLogAction.sticker_delete,
+    discord.AuditLogAction.automod_rule_delete,
+    discord.AuditLogAction.integration_delete,
 }
-
-
+FORUM_CHANNEL_TYPES = {discord.ChannelType.forum}
 @bot.event
 async def on_audit_log_entry(entry: discord.AuditLogEntry):
     if entry.action not in WATCHED_ACTIONS:
@@ -1213,25 +1053,20 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
     actor = entry.user
     if actor is None or actor.id == bot.user.id:
         return
-
     guild = entry.guild
-    member = guild.get_member(actor.id)
     s = cfg(guild.id)
-
+    if _audit_entry_already_processed(entry.id, s.get("audit_log_cache_ttl_seconds", 30)):
+        return
+    member = guild.get_member(actor.id)
     if member and is_protected(member, guild.id):
         return
     if is_whitelisted_user(guild.id, actor.id):
         return
-
     now = time.time()
-
-    # --- Protected role check ---
     if entry.action in (discord.AuditLogAction.role_delete, discord.AuditLogAction.role_update):
         target_id = getattr(entry.target, "id", None)
         if target_id in set(s.get("protected_role_ids", [])):
             await log(guild, f"⚠️ Phát hiện thay đổi role được bảo vệ (`{target_id}`) bởi {actor.mention} — kiểm tra ngay!", discord.Color.dark_red(), critical=True)
-
-    # --- NEW: Mass Ban / Mass Kick detection ---
     if entry.action == discord.AuditLogAction.ban:
         bucket = recent_bans[guild.id]
         bucket.append((now, actor.id))
@@ -1243,7 +1078,6 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
             _prune_empty(recent_bans, guild.id)
             await handle_mod_abuse(guild, actor, member, "mass_ban", f"{actor_bans} lượt ban trong {s['mass_ban_window']}s")
             return
-
     if entry.action == discord.AuditLogAction.kick:
         bucket = recent_kicks[guild.id]
         bucket.append((now, actor.id))
@@ -1255,8 +1089,6 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
             _prune_empty(recent_kicks, guild.id)
             await handle_mod_abuse(guild, actor, member, "mass_kick", f"{actor_kicks} lượt kick trong {s['mass_kick_window']}s")
             return
-
-    # --- NEW: Channel Permission Wipe detection ---
     if entry.action == discord.AuditLogAction.channel_update:
         key = (guild.id, actor.id)
         bucket = recent_perm_updates[key]
@@ -1269,8 +1101,6 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
             await log(guild, f"⚠️ **Channel Permission Wipe phát hiện** — {actor.mention} sửa quyền hàng loạt kênh. Dùng `/restoreall` để khôi phục overwrite từ backup.", discord.Color.dark_red(), critical=True)
             await handle_mod_abuse(guild, actor, member, "perm_wipe", f"sửa quyền {len(bucket)}+ kênh trong {s['perm_wipe_window']}s", skip_role_strip=False)
             return
-
-    # --- NEW: Webhook spam detection ---
     if entry.action == discord.AuditLogAction.webhook_create:
         key = (guild.id, actor.id)
         bucket = recent_webhook_creates[key]
@@ -1282,7 +1112,6 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
             _prune_empty(recent_webhook_creates, key)
             await handle_mod_abuse(guild, actor, member, "webhook_spam", f"tạo {s['webhook_create_threshold']}+ webhook trong {s['webhook_create_window']}s")
             return
-        # Xóa webhook lạ không nằm trong whitelist nếu vượt giới hạn tổng
         try:
             webhooks = await guild.webhooks()
             if len(webhooks) > s["max_webhooks_per_guild"]:
@@ -1292,27 +1121,146 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
                     await log(guild, f"🪝 Đã xóa webhook lạ do vượt giới hạn ({len(webhooks)}/{s['max_webhooks_per_guild']}) — tạo bởi {actor.mention}", discord.Color.gold())
         except discord.Forbidden:
             pass
-
-    # --- Nuke action counter (đã có sẵn) ---
+    if entry.action == discord.AuditLogAction.guild_update:
+        snap = guild_identity_snapshot.get(guild.id)
+        before = getattr(entry, "before", None)
+        after = getattr(entry, "after", None)
+        if s.get("vanity_url_protection", True):
+            before_vanity = getattr(before, "vanity_url_code", None)
+            after_vanity = getattr(after, "vanity_url_code", None)
+            if before_vanity is not None and after_vanity is not None and before_vanity != after_vanity:
+                await log(guild, f"🔗 **Vanity URL bị đổi** từ `{before_vanity}` → `{after_vanity}` bởi {actor.mention}!", discord.Color.dark_red(), critical=True)
+                await handle_mod_abuse(guild, actor, member, "vanity_hijack", f"đổi vanity URL `{before_vanity}` → `{after_vanity}`")
+                return
+        if s.get("guild_identity_protection", True):
+            changed = []
+            for attr, label in (("name", "tên server"), ("icon", "icon server"), ("banner", "banner server"), ("verification_level", "verification level")):
+                b_val = getattr(before, attr, None)
+                a_val = getattr(after, attr, None)
+                if b_val is not None and a_val is not None and b_val != a_val:
+                    changed.append(label)
+            if changed:
+                threshold = adaptive_threshold(1, guild, actor, member, s)
+                key = (guild.id, actor.id)
+                bucket = recent_perm_updates[("identity", *key)]
+                bucket.append(now)
+                while bucket and now - bucket[0] > 60:
+                    bucket.popleft()
+                if len(bucket) >= threshold:
+                    bucket.clear()
+                    await log(guild, f"🏷️ **Guild identity bị thay đổi** ({', '.join(changed)}) bởi {actor.mention}. Kiểm tra `/restoreall` nếu cần khôi phục.", discord.Color.dark_red(), critical=True)
+                    await handle_mod_abuse(guild, actor, member, "guild_identity", f"đổi {', '.join(changed)}")
+                    return
+                else:
+                    note_clean_actor_action(guild.id, actor.id)
+        if snap is not None:
+            guild_identity_snapshot[guild.id] = {
+                "name": guild.name,
+                "icon": guild.icon.key if guild.icon else None,
+                "banner": guild.banner.key if guild.banner else None,
+                "vanity": getattr(guild, "vanity_url_code", None),
+                "verification_level": str(guild.verification_level),
+            }
+    if entry.action == discord.AuditLogAction.bot_add:
+        target = getattr(entry, "target", None)
+        target_id = getattr(target, "id", None)
+        if target_id and not is_whitelisted_bot(guild.id, target_id):
+            if s.get("auto_ban_unauthorized_bot_adder", True):
+                await log(guild, f"🤖 **Bot lạ bị thêm vào server**: `{getattr(target, 'name', target_id)}` bởi {actor.mention} — không nằm trong whitelist!", discord.Color.dark_red(), critical=True)
+                await handle_mod_abuse(guild, actor, member, "unauthorized_bot_add", f"thêm bot lạ `{target_id}` không whitelist")
+                bot_member = guild.get_member(target_id)
+                if bot_member:
+                    await safe_action(bot_member.kick(reason="Anti-nuke: bot lạ không whitelist"), action_name="kick unauthorized bot", guild_id=guild.id)
+                return
+            else:
+                note_clean_actor_action(guild.id, actor.id)
+        else:
+            note_clean_actor_action(guild.id, actor.id)
+    if entry.action in (discord.AuditLogAction.emoji_delete, discord.AuditLogAction.sticker_delete):
+        key = (guild.id, actor.id)
+        bucket = recent_emoji_sticker_actions[key]
+        bucket.append(now)
+        while bucket and now - bucket[0] > s["emoji_sticker_nuke_window"]:
+            bucket.popleft()
+        threshold = adaptive_threshold(s["emoji_sticker_nuke_threshold"], guild, actor, member, s)
+        if len(bucket) >= threshold:
+            bucket.clear()
+            _prune_empty(recent_emoji_sticker_actions, key)
+            kind = "sticker" if entry.action == discord.AuditLogAction.sticker_delete else "emoji"
+            await handle_mod_abuse(guild, actor, member, "emoji_sticker_nuke", f"xóa hàng loạt {kind} ({len(bucket)}+ trong {s['emoji_sticker_nuke_window']}s)")
+            return
+        else:
+            note_clean_actor_action(guild.id, actor.id)
+    if entry.action == discord.AuditLogAction.automod_rule_delete:
+        key = (guild.id, actor.id)
+        bucket = recent_automod_deletes[key]
+        bucket.append(now)
+        while bucket and now - bucket[0] > s["automod_delete_window"]:
+            bucket.popleft()
+        threshold = adaptive_threshold(s["automod_delete_threshold"], guild, actor, member, s)
+        if len(bucket) >= threshold:
+            bucket.clear()
+            _prune_empty(recent_automod_deletes, key)
+            await handle_mod_abuse(guild, actor, member, "automod_delete", f"xóa {len(bucket)}+ AutoMod rule trong {s['automod_delete_window']}s")
+            return
+        else:
+            note_clean_actor_action(guild.id, actor.id)
+    if entry.action == discord.AuditLogAction.integration_delete:
+        key = (guild.id, actor.id)
+        bucket = recent_integration_deletes[key]
+        bucket.append(now)
+        while bucket and now - bucket[0] > s["integration_delete_window"]:
+            bucket.popleft()
+        threshold = adaptive_threshold(s["integration_delete_threshold"], guild, actor, member, s)
+        if len(bucket) >= threshold:
+            bucket.clear()
+            _prune_empty(recent_integration_deletes, key)
+            await handle_mod_abuse(guild, actor, member, "integration_delete", f"xóa {len(bucket)}+ integration trong {s['integration_delete_window']}s")
+            return
+        else:
+            note_clean_actor_action(guild.id, actor.id)
+    if entry.action == discord.AuditLogAction.integration_create:
+        target = getattr(entry, "target", None)
+        app_name = (getattr(target, "name", "") or "").lower()
+        keywords = s.get("oauth_suspicious_keywords", [])
+        hit = next((kw for kw in keywords if kw in app_name), None)
+        if hit:
+            await log(guild, f"🔐 **OAuth2/Integration khả nghi**: `{app_name}` (khớp từ khóa `{hit}`) được thêm bởi {actor.mention} — kiểm tra ngay!", discord.Color.dark_red(), critical=True)
+            add_suspicion(guild.id, actor.id, "oauth_suspicious", s["suspicion_decay_seconds"])
+            bump_stat(guild.id, "oauth_suspicious_blocked", 1)
+        else:
+            note_clean_actor_action(guild.id, actor.id)
+    if entry.action == discord.AuditLogAction.channel_delete:
+        target = getattr(entry, "target", None)
+        ch_type = getattr(target, "type", None)
+        if ch_type in FORUM_CHANNEL_TYPES:
+            key = ("forum", guild.id, actor.id)
+            bucket = recent_perm_updates[key]
+            bucket.append(now)
+            while bucket and now - bucket[0] > s["nuke_action_window"]:
+                bucket.popleft()
+            threshold = adaptive_threshold(max(2, s["nuke_action_threshold"] - 1), guild, actor, member, s)
+            if len(bucket) >= threshold:
+                bucket.clear()
+                _prune_empty(recent_perm_updates, key)
+                await handle_mod_abuse(guild, actor, member, "nuke", f"xóa hàng loạt forum channel ({len(bucket)}+ trong {s['nuke_action_window']}s)")
+                return
     key = (guild.id, actor.id)
     bucket = recent_nuke_actions[key]
     bucket.append(now)
     while bucket and now - bucket[0] > s["nuke_action_window"]:
         bucket.popleft()
-
     is_critical_action = entry.action in CRITICAL_ACTIONS
-    threshold = max(2, s["nuke_action_threshold"] - 1) if is_critical_action else s["nuke_action_threshold"]
-
+    base_threshold = max(2, s["nuke_action_threshold"] - 1) if is_critical_action else s["nuke_action_threshold"]
+    threshold = adaptive_threshold(base_threshold, guild, actor, member, s)
     if len(bucket) >= threshold:
         bucket.clear()
         _prune_empty(recent_nuke_actions, key)
         await handle_mod_abuse(guild, actor, member, "nuke", f"spam `{entry.action.name}`")
     else:
         _prune_empty(recent_nuke_actions, key)
-
-
+        note_clean_actor_action(guild.id, actor.id)
 async def handle_mod_abuse(guild: discord.Guild, actor, member, category: str, reason_text: str, skip_role_strip: bool = False):
-    """Xử lý chung khi phát hiện hành vi phá hoại: tước quyền + ban + log + cộng suspicion."""
     s = cfg(guild.id)
     if member and not skip_role_strip:
         dangerous = [r for r in member.roles if r != guild.default_role and (
@@ -1326,25 +1274,27 @@ async def handle_mod_abuse(guild: discord.Guild, actor, member, category: str, r
                 action_name="remove dangerous roles",
                 guild_id=guild.id,
             )
-
     if member:
         await safe_action(
             guild.ban(member, reason=f"Anti-nuke: {reason_text}"),
             action_name="ban abusive mod",
             guild_id=guild.id,
         )
-
     score = add_suspicion(guild.id, actor.id, category, s["suspicion_decay_seconds"])
     bump_stat(guild.id, "nuke_blocked" if category == "nuke" else f"{category}_blocked", 1)
-
     label = {
         "nuke": "🛑 Anti-nuke",
         "mass_ban": "🛑 Mass-ban abuse",
         "mass_kick": "🛑 Mass-kick abuse",
         "perm_wipe": "🛑 Permission wipe abuse",
         "webhook_spam": "🛑 Webhook spam",
+        "vanity_hijack": "🛑 Vanity URL Hijack",
+        "guild_identity": "🛑 Guild Identity Change",
+        "unauthorized_bot_add": "🛑 Unauthorized Bot Add",
+        "emoji_sticker_nuke": "🛑 Emoji/Sticker Nuke",
+        "automod_delete": "🛑 AutoMod Rule Delete Abuse",
+        "integration_delete": "🛑 Integration Delete Abuse",
     }.get(category, "🛑 Hành vi phá hoại")
-
     await log(
         guild,
         f"**{label}** — {actor.mention} (`{actor.id}`): {reason_text}. "
@@ -1352,13 +1302,10 @@ async def handle_mod_abuse(guild: discord.Guild, actor, member, category: str, r
         discord.Color.dark_red(),
         critical=True,
     )
-
-
 async def bulk_delete_messages(guild: discord.Guild, msgs: list[discord.Message]):
     by_channel: dict[int, list[discord.Message]] = defaultdict(list)
     for m in msgs:
         by_channel[m.channel.id].append(m)
-
     for channel_id, chan_msgs in by_channel.items():
         channel = guild.get_channel(channel_id)
         if channel is None:
@@ -1366,16 +1313,12 @@ async def bulk_delete_messages(guild: discord.Guild, msgs: list[discord.Message]
         fresh_cutoff = discord.utils.utcnow() - datetime.timedelta(days=14)
         bulk_eligible = [m for m in chan_msgs if m.created_at > fresh_cutoff]
         too_old = [m for m in chan_msgs if m.created_at <= fresh_cutoff]
-
         if len(bulk_eligible) == 1:
             await safe_action(bulk_eligible[0].delete(), action_name="delete spam message", guild_id=guild.id)
         elif bulk_eligible:
             await safe_action(channel.delete_messages(bulk_eligible), action_name="bulk delete spam", guild_id=guild.id)
         for m in too_old:
             await safe_action(m.delete(), action_name="delete old spam message", guild_id=guild.id)
-
-
-# ------------------------------------------------------- NEW: token grabber / content checks
 def contains_token_grabber_keyword(content: str, keywords: list[str]) -> str | None:
     normalized = normalize(content)
     for kw in keywords:
@@ -1383,15 +1326,19 @@ def contains_token_grabber_keyword(content: str, keywords: list[str]) -> str | N
         if kw_norm and kw_norm in normalized:
             return kw
     return None
-
-
+SELFBOT_SIGNATURE_PATTERN = re.compile(
+    r"(nighty|deutschbot|selfbot|discord-self|self-bot|autotype|mass\s*dm\s*tool)",
+    re.IGNORECASE,
+)
+def looks_like_selfbot_signature(content: str) -> str | None:
+    match = SELFBOT_SIGNATURE_PATTERN.search(content or "")
+    return match.group(0) if match else None
 @bot.event
 async def on_message(message: discord.Message):
     if not message.guild or message.author.id == bot.user.id:
         return
     if isinstance(message.channel, (discord.VoiceChannel, discord.StageChannel)):
         return
-
     member = message.author
     if not isinstance(member, discord.Member):
         resolved = message.guild.get_member(member.id)
@@ -1404,61 +1351,62 @@ async def on_message(message: discord.Message):
         if resolved is None:
             return
         member = resolved
-
     is_other_bot = member.bot
     guild_id = message.guild.id
-
     if is_other_bot and is_whitelisted_bot(guild_id, member.id):
         return
     if not is_other_bot and is_protected(member, guild_id):
         return
-
     s = cfg(guild_id)
-
+    if not is_other_bot:
+        sig = looks_like_selfbot_signature(message.content)
+        if sig:
+            score = add_suspicion(guild_id, member.id, "selfbot", s["suspicion_decay_seconds"])
+            bump_stat(guild_id, "selfbot_flagged", 1)
+            await log(message.guild, f"🕵️ **Dấu hiệu Selfbot** phát hiện ở {member.mention}: khớp `{sig}`. (Suspicion: {score})", discord.Color.orange())
+            await apply_suspicion_consequence(message.guild, member, score, s)
     if s.get("lockdown_active") and not is_other_bot:
         account_age = (discord.utils.utcnow() - member.created_at).days
         if account_age < s["raid_min_account_age_days"]:
             await safe_action(message.delete(), action_name="delete message during lockdown", guild_id=guild_id)
             return
-
     raw_content = message.content
-    clean_content = strip_invisible_chars(raw_content)  # NEW: bỏ zero-width/RTL trước khi lọc
-
+    clean_content = strip_invisible_chars(raw_content)
+    morse_decoded = None
+    if looks_like_morse(clean_content):
+        morse_decoded = decode_morse(clean_content)
+    check_content = f"{clean_content} {morse_decoded}" if morse_decoded else clean_content
     if not is_other_bot:
-        # NEW: Anti Token Grabber
-        tg_hit = contains_token_grabber_keyword(clean_content, s.get("token_grabber_keywords", []))
+        tg_hit = contains_token_grabber_keyword(check_content, s.get("token_grabber_keywords", []))
         if tg_hit:
             await safe_action(message.delete(), action_name="delete token grabber message", guild_id=guild_id)
             until = discord.utils.utcnow() + datetime.timedelta(hours=1)
             await safe_action(member.timeout(until, reason=f"Anti-token-grabber: {tg_hit}"), action_name="timeout token grabber poster", guild_id=guild_id)
             score = add_suspicion(guild_id, member.id, "token_grabber", s["suspicion_decay_seconds"])
-            await log(message.guild, f"🔐⚠️ Chặn nội dung nghi token grabber (`{tg_hit}`) từ {member.mention}", discord.Color.dark_red(), critical=True)
+            morse_note = f" (giải mã từ Morse: `{morse_decoded}`)" if morse_decoded else ""
+            await log(message.guild, f"🔐⚠️ Chặn nội dung nghi token grabber (`{tg_hit}`){morse_note} từ {member.mention}", discord.Color.dark_red(), critical=True)
             bump_stat(guild_id, "token_grabber_blocked", 1)
             await apply_suspicion_consequence(message.guild, member, score, s)
             return
-
         if s["badwords"]:
-            hit_word = contains_badword(clean_content, s["badwords"])
+            hit_word = contains_badword(check_content, s["badwords"])
             if hit_word:
                 await safe_action(message.delete(), action_name="delete badword message", guild_id=guild_id)
-                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{hit_word}`) của {member.mention}", discord.Color.gold())
+                morse_note = f" (giải mã từ Morse: `{morse_decoded}`)" if morse_decoded else ""
+                await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{hit_word}`){morse_note} của {member.mention}", discord.Color.gold())
                 bump_stat(guild_id, "badword_blocked", 1)
                 score = add_suspicion(guild_id, member.id, "badword", s["suspicion_decay_seconds"])
                 await apply_suspicion_consequence(message.guild, member, score, s)
                 return
-
         if is_zalgo(clean_content, s["zalgo_max_combining_chars"]):
             await safe_action(message.delete(), action_name="delete zalgo message", guild_id=guild_id)
             await log(message.guild, f"👾 Xóa tin nhắn chứa ký tự zalgo bất thường từ {member.mention}", discord.Color.gold())
             score = add_suspicion(guild_id, member.id, "zalgo", s["suspicion_decay_seconds"])
             await apply_suspicion_consequence(message.guild, member, score, s)
             return
-
-        # NEW: mention count tính trên nội dung đã strip invisible chars (chặn lách @everyone bằng zero-width)
         mention_count = len(message.mentions) + len(message.role_mentions)
         if raw_content != clean_content and ("@everyone" in clean_content or "@here" in clean_content):
-            mention_count = max(mention_count, s["mass_mention_threshold"])  # coi như mention-raid nếu cố tình lách @everyone
-
+            mention_count = max(mention_count, s["mass_mention_threshold"])
         if mention_count >= s["mass_mention_threshold"]:
             await safe_action(message.delete(), action_name="delete mass-mention message", guild_id=guild_id)
             until = discord.utils.utcnow() + datetime.timedelta(seconds=s["mass_mention_timeout_seconds"])
@@ -1468,7 +1416,6 @@ async def on_message(message: discord.Message):
             score = add_suspicion(guild_id, member.id, "mass_mention", s["suspicion_decay_seconds"])
             await apply_suspicion_consequence(message.guild, member, score, s)
             return
-
         if INVITE_RE.search(clean_content):
             account_age = (discord.utils.utcnow() - member.created_at).days
             if account_age < s["invite_new_account_days"]:
@@ -1477,7 +1424,6 @@ async def on_message(message: discord.Message):
                 score = add_suspicion(guild_id, member.id, "invite_spam", s["suspicion_decay_seconds"])
                 await apply_suspicion_consequence(message.guild, member, score, s)
                 return
-
         urls = URL_RE.findall(clean_content)
         hit = None
         hit_reason = ""
@@ -1501,7 +1447,6 @@ async def on_message(message: discord.Message):
                     break
                 has_lure = re.search(r"nitro|free|giveaway|airdrop|claim", clean_content, re.IGNORECASE)
                 if is_shortener(host) and has_lure:
-                    # NEW: unwrap redirect trước khi kết luận, giảm false-positive
                     full_url = f"https://{host}{_path}"
                     final_url = await unwrap_redirect(full_url)
                     final_host = URL_RE.match(final_url)
@@ -1522,24 +1467,18 @@ async def on_message(message: discord.Message):
             score = add_suspicion(guild_id, member.id, "scam", s["suspicion_decay_seconds"])
             await apply_suspicion_consequence(message.guild, member, score, s)
             return
-
     key = (guild_id, member.id)
     now = time.time()
-
-    # NEW: Anti spam ngắt quãng — rải 1 đợt, nghỉ, rải tiếp để né ngưỡng spam nhanh
     timeline = message_timeline[key]
     timeline.append((now, message))
     while timeline and now - timeline[0][0] > s["intermittent_spam_window"]:
         timeline.popleft()
-
     intermittent_bursts = detect_intermittent_spam(list(timeline), s)
     if intermittent_bursts:
         timeline.clear()
         _prune_empty(message_timeline, key)
-
         burst_msgs = [m for burst in intermittent_bursts for _, m in burst]
         await bulk_delete_messages(message.guild, burst_msgs)
-
         if is_other_bot:
             await softban(
                 message.guild, member,
@@ -1567,25 +1506,20 @@ async def on_message(message: discord.Message):
             )
             score = add_suspicion(guild_id, member.id, "spam_intermittent", s["suspicion_decay_seconds"])
             await apply_suspicion_consequence(message.guild, member, score, s)
-
         bump_stat(guild_id, "intermittent_spam_blocked", 1)
         bump_stat(guild_id, "spam_blocked", 1)
         return
     else:
         _prune_empty(message_timeline, key)
-
     bucket = recent_messages[key]
     bucket.append((now, message))
     while bucket and now - bucket[0][0] > s["spam_msg_window"]:
         bucket.popleft()
-
     if len(bucket) >= s["spam_msg_threshold"]:
         msgs = [m for _, m in bucket]
         bucket.clear()
         _prune_empty(recent_messages, key)
-
         await bulk_delete_messages(message.guild, msgs)
-
         hit_channels = []
         seen_ids = set()
         for m in msgs:
@@ -1593,7 +1527,6 @@ async def on_message(message: discord.Message):
                 seen_ids.add(m.channel.id)
                 hit_channels.append(m.channel)
         channels_note = f" — trải qua {len(hit_channels)} kênh: " + ", ".join(c.mention for c in hit_channels) if len(hit_channels) > 1 else ""
-
         if is_other_bot:
             await softban(message.guild, member, reason="Anti-spam: bot spam tin nhắn", delete_seconds=s["raid_softban_delete_seconds"])
             await log(message.guild, f"⏱️🤖 {member.mention} (bot) bị softban vì spam ({len(msgs)} tin){channels_note}", discord.Color.orange())
@@ -1607,14 +1540,12 @@ async def on_message(message: discord.Message):
         return
     else:
         _prune_empty(recent_messages, key)
-
     norm_content = normalize_for_dedupe(message.content)
     if norm_content:
         dup_bucket = recent_message_contents[key]
         dup_bucket.append((now, norm_content, message))
         while dup_bucket and now - dup_bucket[0][0] > s["slow_spam_window"]:
             dup_bucket.popleft()
-
         raid_window_msgs = [
             m for (ts, c, m) in dup_bucket
             if c == norm_content and now - ts <= s["raid_channel_spam_window"]
@@ -1622,16 +1553,13 @@ async def on_message(message: discord.Message):
         raid_channels = {}
         for m in raid_window_msgs:
             raid_channels.setdefault(m.channel.id, m.channel)
-
         if len(raid_channels) >= s["raid_channel_spam_threshold"]:
             dup_bucket.clear()
             _prune_empty(recent_message_contents, key)
-
             channels_list = list(raid_channels.values())
             channels_text = ", ".join(c.mention for c in channels_list)
             event_time = discord.utils.utcnow()
             content_preview = message.content if len(message.content) <= 300 else message.content[:300] + "…"
-
             await bulk_delete_messages(message.guild, raid_window_msgs)
             did_softban = await softban(
                 message.guild,
@@ -1639,7 +1567,6 @@ async def on_message(message: discord.Message):
                 reason=f"Anti-raid: spam cùng nội dung vào {len(raid_channels)} kênh trong {s['raid_channel_spam_window']}s",
                 delete_seconds=s["raid_softban_delete_seconds"],
             )
-
             await log(
                 message.guild,
                 "🚨 **RAID DETECTED (cross-channel spam)**\n"
@@ -1653,13 +1580,10 @@ async def on_message(message: discord.Message):
             )
             bump_stat(guild_id, "raid_blocked", 1)
             return
-
         same_content_msgs = [m for (_, c, m) in dup_bucket if c == norm_content]
-
         if len(same_content_msgs) >= s["slow_spam_duplicate_threshold"]:
             dup_bucket.clear()
             _prune_empty(recent_message_contents, key)
-
             hit_channels = []
             seen_ids = set()
             for m in same_content_msgs:
@@ -1668,9 +1592,7 @@ async def on_message(message: discord.Message):
                     hit_channels.append(m.channel)
             channels_text = ", ".join(c.mention for c in hit_channels)
             cross_channel = len(hit_channels) > 1
-
             await bulk_delete_messages(message.guild, same_content_msgs)
-
             if is_other_bot:
                 await softban(message.guild, member, reason="Anti-spam: bot lặp lại cùng nội dung", delete_seconds=s["raid_softban_delete_seconds"])
             else:
@@ -1682,7 +1604,6 @@ async def on_message(message: discord.Message):
                 )
                 score = add_suspicion(guild_id, member.id, "spam_slow", s["suspicion_decay_seconds"])
                 await apply_suspicion_consequence(message.guild, member, score, s)
-
             verdict = (
                 f"➡️ **Kết luận: cùng 1 người ({member.mention}) đã rải nội dung này qua "
                 f"{len(hit_channels)} kênh khác nhau** — không phải trùng hợp ngẫu nhiên."
@@ -1701,27 +1622,16 @@ async def on_message(message: discord.Message):
             return
         else:
             _prune_empty(recent_message_contents, key)
-
-
-# ------------------------------------------------------- NEW: Mass Role Grant (qua audit log riêng)
 @bot.event
 async def on_audit_log_entry_for_mass_role(entry: discord.AuditLogEntry):
-    """Không dùng — logic mass role grant được gộp vào on_member_update để tránh 2 listener trùng audit fetch."""
     pass
-
-
-# ---------------------------------------------------------------- commands -
 def admin_only():
     return app_commands.checks.has_permissions(administrator=True)
-
-
 @bot.tree.command(name="setlog", description="Đặt kênh nhận log cảnh báo bảo mật")
 @admin_only()
 async def setlog(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_and_save(interaction.guild.id, "log_channel_id", channel.id)
     await interaction.response.send_message(f"✅ Đã đặt kênh log: {channel.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="setlogwebhook", description="Đặt webhook URL để nhận log (không cần bot có quyền trong channel)")
 @admin_only()
 async def setlogwebhook(interaction: discord.Interaction, url: str):
@@ -1731,8 +1641,6 @@ async def setlogwebhook(interaction: discord.Interaction, url: str):
     await set_and_save(interaction.guild.id, "log_webhook_url", url)
     _webhook_cache.pop(url, None)
     await interaction.response.send_message("✅ Đã đặt webhook log.", ephemeral=True)
-
-
 @bot.tree.command(name="togglealertowner", description="Bật/tắt DM cho owner khi có sự cố nghiêm trọng")
 @admin_only()
 async def togglealertowner(interaction: discord.Interaction):
@@ -1740,8 +1648,6 @@ async def togglealertowner(interaction: discord.Interaction):
     new_val = not s.get("alert_owner_on_critical", True)
     await set_and_save(interaction.guild.id, "alert_owner_on_critical", new_val)
     await interaction.response.send_message(f"✅ Alert owner khi nghiêm trọng: {'Bật' if new_val else 'Tắt'}", ephemeral=True)
-
-
 @bot.tree.command(name="lockdown", description="Bật/tắt lockdown thủ công (chặn account mới nhắn tin/join)")
 @admin_only()
 async def lockdown(interaction: discord.Interaction, active: bool):
@@ -1751,8 +1657,6 @@ async def lockdown(interaction: discord.Interaction, active: bool):
     else:
         await log(interaction.guild, f"🔓 Lockdown mode tắt bởi {interaction.user.mention}", discord.Color.green())
     await interaction.response.send_message(f"✅ Lockdown: {'BẬT' if active else 'Tắt'}", ephemeral=True)
-
-
 @bot.tree.command(name="protectrole", description="Đánh dấu 1 role được bảo vệ khỏi xóa/sửa trái phép")
 @admin_only()
 async def protectrole(interaction: discord.Interaction, role: discord.Role):
@@ -1761,8 +1665,6 @@ async def protectrole(interaction: discord.Interaction, role: discord.Role):
     ids.add(role.id)
     await set_and_save(interaction.guild.id, "protected_role_ids", list(ids))
     await interaction.response.send_message(f"✅ Đã bảo vệ role {role.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="unprotectrole", description="Bỏ bảo vệ 1 role")
 @admin_only()
 async def unprotectrole(interaction: discord.Interaction, role: discord.Role):
@@ -1770,16 +1672,12 @@ async def unprotectrole(interaction: discord.Interaction, role: discord.Role):
     ids = [r for r in s.get("protected_role_ids", []) if r != role.id]
     await set_and_save(interaction.guild.id, "protected_role_ids", ids)
     await interaction.response.send_message(f"✅ Đã bỏ bảo vệ role {role.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="backupnow", description="Chụp snapshot role/channel/permission ngay lập tức")
 @admin_only()
 async def backupnow(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await snapshot_guild(interaction.guild)
     await interaction.followup.send("✅ Đã lưu snapshot role/channel/category hiện tại.", ephemeral=True)
-
-
 @bot.tree.command(name="backupinfo", description="Xem thời điểm backup gần nhất và số lượng đã lưu")
 @admin_only()
 async def backupinfo(interaction: discord.Interaction):
@@ -1795,8 +1693,6 @@ async def backupinfo(interaction: discord.Interaction):
         f"• Channels: {len(data['channels'])}",
         ephemeral=True,
     )
-
-
 @bot.tree.command(name="restorerole", description="Khôi phục quyền của 1 role từ backup gần nhất (theo tên)")
 @admin_only()
 async def restorerole(interaction: discord.Interaction, role: discord.Role):
@@ -1815,27 +1711,21 @@ async def restorerole(interaction: discord.Interaction, role: discord.Role):
         guild_id=interaction.guild.id,
     )
     await interaction.response.send_message(f"✅ Đã khôi phục quyền cho role {role.mention} từ backup.", ephemeral=True)
-
-
 @bot.tree.command(name="restoreall", description="⚠️ Khôi phục TOÀN BỘ role/category/channel bị xóa từ backup gần nhất (bán tự động, admin xác nhận)")
 @admin_only()
 async def restoreall(interaction: discord.Interaction, confirm: bool):
     if not confirm:
         await interaction.response.send_message("❌ Cần đặt `confirm: True` để xác nhận thực hiện khôi phục hàng loạt (có thể mất vài phút và tạo nhiều role/channel).", ephemeral=True)
         return
-
     data = backups.get(str(interaction.guild.id))
     if not data:
         await interaction.response.send_message("❌ Chưa có backup nào để khôi phục.", ephemeral=True)
         return
-
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-
     roles_restored = await restore_roles(guild, data)
     category_map = await restore_categories(guild, data)
     channels_restored = await restore_channels(guild, data, category_map)
-
     await log(
         guild,
         f"♻️ **Restore-all hoàn tất** bởi {interaction.user.mention}\n"
@@ -1848,24 +1738,17 @@ async def restoreall(interaction: discord.Interaction, confirm: bool):
         f"✅ Đã khôi phục: {roles_restored} role, {len(category_map)} category, {channels_restored} channel.",
         ephemeral=True,
     )
-
-
 @bot.tree.command(name="suspicion", description="Xem điểm nghi ngờ hiện tại của 1 thành viên")
 @admin_only()
 async def suspicion(interaction: discord.Interaction, member: discord.Member):
     entry = suspicion_scores.get((interaction.guild.id, member.id))
     score = int(entry[0]) if entry else 0
     await interaction.response.send_message(f"📊 Điểm nghi ngờ của {member.mention}: **{score}**", ephemeral=True)
-
-
 @bot.tree.command(name="resetsuspicion", description="Reset điểm nghi ngờ của 1 thành viên về 0")
 @admin_only()
 async def resetsuspicion(interaction: discord.Interaction, member: discord.Member):
     suspicion_scores.pop((interaction.guild.id, member.id), None)
     await interaction.response.send_message(f"✅ Đã reset điểm nghi ngờ của {member.mention}", ephemeral=True)
-
-
-# --- Whitelist commands ---
 @bot.tree.command(name="whitelistuser", description="Thêm user vào whitelist (bot bỏ qua mọi kiểm tra với user này)")
 @admin_only()
 async def whitelistuser(interaction: discord.Interaction, user: discord.User):
@@ -1874,8 +1757,6 @@ async def whitelistuser(interaction: discord.Interaction, user: discord.User):
     ids.add(user.id)
     await set_and_save(interaction.guild.id, "whitelist_user_ids", list(ids))
     await interaction.response.send_message(f"✅ Đã whitelist user {user.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="unwhitelistuser", description="Bỏ user khỏi whitelist")
 @admin_only()
 async def unwhitelistuser(interaction: discord.Interaction, user: discord.User):
@@ -1883,8 +1764,6 @@ async def unwhitelistuser(interaction: discord.Interaction, user: discord.User):
     ids = [u for u in s.get("whitelist_user_ids", []) if u != user.id]
     await set_and_save(interaction.guild.id, "whitelist_user_ids", ids)
     await interaction.response.send_message(f"✅ Đã bỏ whitelist user {user.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="whitelistrole", description="Thêm role vào whitelist (thành viên có role này được bỏ qua kiểm tra)")
 @admin_only()
 async def whitelistrole(interaction: discord.Interaction, role: discord.Role):
@@ -1893,8 +1772,6 @@ async def whitelistrole(interaction: discord.Interaction, role: discord.Role):
     ids.add(role.id)
     await set_and_save(interaction.guild.id, "whitelist_role_ids", list(ids))
     await interaction.response.send_message(f"✅ Đã whitelist role {role.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="unwhitelistrole", description="Bỏ role khỏi whitelist")
 @admin_only()
 async def unwhitelistrole(interaction: discord.Interaction, role: discord.Role):
@@ -1902,8 +1779,6 @@ async def unwhitelistrole(interaction: discord.Interaction, role: discord.Role):
     ids = [r for r in s.get("whitelist_role_ids", []) if r != role.id]
     await set_and_save(interaction.guild.id, "whitelist_role_ids", ids)
     await interaction.response.send_message(f"✅ Đã bỏ whitelist role {role.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="whitelistbot", description="Thêm bot ID vào whitelist (bot đáng tin cậy, không bị auto-ban/xử lý)")
 @admin_only()
 async def whitelistbot(interaction: discord.Interaction, bot_id: str):
@@ -1916,8 +1791,6 @@ async def whitelistbot(interaction: discord.Interaction, bot_id: str):
     ids.add(bid)
     await set_and_save(interaction.guild.id, "whitelist_bot_ids", list(ids))
     await interaction.response.send_message(f"✅ Đã whitelist bot ID `{bid}`", ephemeral=True)
-
-
 @bot.tree.command(name="unwhitelistbot", description="Bỏ bot ID khỏi whitelist")
 @admin_only()
 async def unwhitelistbot(interaction: discord.Interaction, bot_id: str):
@@ -1929,8 +1802,6 @@ async def unwhitelistbot(interaction: discord.Interaction, bot_id: str):
     ids = [b for b in s.get("whitelist_bot_ids", []) if b != bid]
     await set_and_save(interaction.guild.id, "whitelist_bot_ids", ids)
     await interaction.response.send_message(f"✅ Đã bỏ whitelist bot ID `{bid}`", ephemeral=True)
-
-
 @bot.tree.command(name="whitelistwebhook", description="Thêm webhook ID vào whitelist (không bị xóa khi dọn webhook lạ)")
 @admin_only()
 async def whitelistwebhook(interaction: discord.Interaction, webhook_id: str):
@@ -1943,8 +1814,6 @@ async def whitelistwebhook(interaction: discord.Interaction, webhook_id: str):
     ids.add(wid)
     await set_and_save(interaction.guild.id, "whitelist_webhook_ids", list(ids))
     await interaction.response.send_message(f"✅ Đã whitelist webhook ID `{wid}`", ephemeral=True)
-
-
 @bot.tree.command(name="listwhitelist", description="Xem toàn bộ whitelist hiện tại")
 @admin_only()
 async def listwhitelist(interaction: discord.Interaction):
@@ -1955,8 +1824,6 @@ async def listwhitelist(interaction: discord.Interaction):
     embed.add_field(name="Bots", value=str(len(s.get("whitelist_bot_ids", []))), inline=True)
     embed.add_field(name="Webhooks", value=str(len(s.get("whitelist_webhook_ids", []))), inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
 @bot.tree.command(name="addword", description="Thêm từ vào danh sách cấm")
 @admin_only()
 async def addword(interaction: discord.Interaction, word: str):
@@ -1965,8 +1832,6 @@ async def addword(interaction: discord.Interaction, word: str):
         s["badwords"].append(word.lower())
         await set_and_save(interaction.guild.id, "badwords", s["badwords"])
     await interaction.response.send_message(f"✅ Đã thêm từ cấm: `{word}`", ephemeral=True)
-
-
 @bot.tree.command(name="removeword", description="Xóa từ khỏi danh sách cấm")
 @admin_only()
 async def removeword(interaction: discord.Interaction, word: str):
@@ -1974,8 +1839,6 @@ async def removeword(interaction: discord.Interaction, word: str):
     new_list = [w for w in s["badwords"] if w != word.lower()]
     await set_and_save(interaction.guild.id, "badwords", new_list)
     await interaction.response.send_message(f"✅ Đã xóa từ cấm: `{word}`", ephemeral=True)
-
-
 @bot.tree.command(name="listwords", description="Xem danh sách từ cấm")
 @admin_only()
 async def listwords(interaction: discord.Interaction):
@@ -1985,8 +1848,6 @@ async def listwords(interaction: discord.Interaction):
         return
     text = ", ".join(f"`{w}`" for w in s["badwords"])
     await interaction.response.send_message(f"**Danh sách từ cấm ({len(s['badwords'])}):**\n{text}", ephemeral=True)
-
-
 @bot.tree.command(name="addscam", description="Thêm domain vào blocklist link scam")
 @admin_only()
 async def addscam(interaction: discord.Interaction, domain: str):
@@ -1996,8 +1857,6 @@ async def addscam(interaction: discord.Interaction, domain: str):
         s["scam_domains"].append(domain)
         await set_and_save(interaction.guild.id, "scam_domains", s["scam_domains"])
     await interaction.response.send_message(f"✅ Đã thêm domain scam: `{domain}`", ephemeral=True)
-
-
 @bot.tree.command(name="removescam", description="Xóa domain khỏi blocklist link scam")
 @admin_only()
 async def removescam(interaction: discord.Interaction, domain: str):
@@ -2006,8 +1865,6 @@ async def removescam(interaction: discord.Interaction, domain: str):
     new_list = [d for d in s["scam_domains"] if d != domain]
     await set_and_save(interaction.guild.id, "scam_domains", new_list)
     await interaction.response.send_message(f"✅ Đã xóa domain: `{domain}`", ephemeral=True)
-
-
 @bot.tree.command(name="listscam", description="Xem danh sách domain scam")
 @admin_only()
 async def listscam(interaction: discord.Interaction):
@@ -2017,8 +1874,6 @@ async def listscam(interaction: discord.Interaction):
         return
     text = ", ".join(f"`{d}`" for d in s["scam_domains"])
     await interaction.response.send_message(f"**Danh sách domain scam ({len(s['scam_domains'])}):**\n{text}", ephemeral=True)
-
-
 @bot.tree.command(name="blockbot", description="Chặn cứng 1 bot theo ID, ban ngay nếu đang có trong server")
 @admin_only()
 async def blockbot(interaction: discord.Interaction, bot_id: str):
@@ -2030,7 +1885,6 @@ async def blockbot(interaction: discord.Interaction, bot_id: str):
     if bid not in s["blocked_bot_ids"]:
         s["blocked_bot_ids"].append(bid)
         await set_and_save(interaction.guild.id, "blocked_bot_ids", s["blocked_bot_ids"])
-
     member = interaction.guild.get_member(bid)
     if member:
         await safe_action(
@@ -2038,13 +1892,10 @@ async def blockbot(interaction: discord.Interaction, bot_id: str):
             action_name="ban blocklisted bot (manual)",
             guild_id=interaction.guild.id,
         )
-
     msg = f"✅ Đã thêm bot ID `{bid}` vào blocklist."
     if member:
         msg += " Đã ban ngay vì đang có trong server."
     await interaction.response.send_message(msg, ephemeral=True)
-
-
 @bot.tree.command(name="unblockbot", description="Bỏ chặn 1 bot ID khỏi blocklist")
 @admin_only()
 async def unblockbot(interaction: discord.Interaction, bot_id: str):
@@ -2056,8 +1907,6 @@ async def unblockbot(interaction: discord.Interaction, bot_id: str):
     new_list = [b for b in s["blocked_bot_ids"] if b != bid]
     await set_and_save(interaction.guild.id, "blocked_bot_ids", new_list)
     await interaction.response.send_message(f"✅ Đã bỏ chặn bot ID `{bid}`.", ephemeral=True)
-
-
 @bot.tree.command(name="listblockedbots", description="Xem danh sách bot bị chặn")
 @admin_only()
 async def listblockedbots(interaction: discord.Interaction):
@@ -2067,8 +1916,6 @@ async def listblockedbots(interaction: discord.Interaction):
         return
     text = ", ".join(f"`{b}`" for b in s["blocked_bot_ids"])
     await interaction.response.send_message(f"**Bot bị chặn ({len(s['blocked_bot_ids'])}):**\n{text}", ephemeral=True)
-
-
 @bot.tree.command(name="scanbots", description="Quét bot đang có trong server, ban những bot khớp blocklist hoặc tên khả nghi")
 @admin_only()
 async def scanbots(interaction: discord.Interaction):
@@ -2083,7 +1930,6 @@ async def scanbots(interaction: discord.Interaction):
         if member.id in blocked_ids:
             reason = f"trong blocklist (`{member.id}`)"
         elif _is_discord_verified_bot(member):
-            # NEW: bot đã có huy hiệu ✓ Verified từ Discord -> không đưa vào diện nghi ngờ
             continue
         elif s.get("auto_ban_suspicious_bots", True):
             sus = _is_suspicious_bot(member)
@@ -2096,15 +1942,12 @@ async def scanbots(interaction: discord.Interaction):
                 guild_id=interaction.guild.id,
             )
             banned.append(f"{member} (`{member.id}`) — {reason}")
-
     if banned:
         text = "\n".join(banned)
         await log(interaction.guild, f"🤖⛔ **Scan bot** — đã ban {len(banned)} bot:\n{text}", discord.Color.dark_red())
         await interaction.followup.send(f"✅ Đã ban {len(banned)} bot khả nghi:\n{text}", ephemeral=True)
     else:
         await interaction.followup.send("Không tìm thấy bot nào khả nghi.", ephemeral=True)
-
-
 @bot.tree.command(name="togglesuspiciousbots", description="Bật/tắt tự động ban bot có tên khả nghi (None/null/rỗng)")
 @admin_only()
 async def togglesuspiciousbots(interaction: discord.Interaction):
@@ -2114,8 +1957,6 @@ async def togglesuspiciousbots(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"✅ Auto-ban bot khả nghi: {'Bật' if new_val else 'Tắt'}", ephemeral=True
     )
-
-
 @bot.tree.command(name="setconfig", description="Chỉnh 1 ngưỡng cấu hình bảo mật (số nguyên)")
 @admin_only()
 async def setconfig(interaction: discord.Interaction, key: str, value: int):
@@ -2131,17 +1972,11 @@ async def setconfig(interaction: discord.Interaction, key: str, value: int):
         return
     await set_and_save(interaction.guild.id, key, value)
     await interaction.response.send_message(f"✅ Đã đặt `{key}` = `{value}`", ephemeral=True)
-
-
 @setconfig.autocomplete("key")
 async def setconfig_key_autocomplete(interaction: discord.Interaction, current: str):
-    # NEW: dùng autocomplete động thay vì app_commands.choices tĩnh, vì Discord giới hạn
-    # choices tĩnh tối đa 25 — trong khi CONFIGURABLE_INT_KEYS đã vượt xa con số đó.
     current = (current or "").lower()
     matches = [k for k in CONFIGURABLE_INT_KEYS if current in k.lower()]
     return [app_commands.Choice(name=k, value=k) for k in matches[:25]]
-
-
 @bot.tree.command(name="resetconfig", description="Reset toàn bộ cấu hình bảo mật của server về mặc định")
 @admin_only()
 async def resetconfig(interaction: discord.Interaction):
@@ -2156,8 +1991,6 @@ async def resetconfig(interaction: discord.Interaction):
     settings[str(interaction.guild.id)]["whitelist_webhook_ids"] = []
     await save()
     await interaction.response.send_message("✅ Đã reset cấu hình về mặc định.", ephemeral=True)
-
-
 @bot.tree.command(name="exportconfig", description="Xuất toàn bộ cấu hình đã lưu (JSON) của server")
 @admin_only()
 async def exportconfig(interaction: discord.Interaction):
@@ -2174,8 +2007,6 @@ async def exportconfig(interaction: discord.Interaction):
         await interaction.followup.send(file=file, ephemeral=True)
         return
     await interaction.response.send_message(f"```json\n{text}\n```", ephemeral=True)
-
-
 @bot.tree.command(name="importconfig", description="Nhập cấu hình từ file JSON đã export trước đó")
 @admin_only()
 async def importconfig(interaction: discord.Interaction, file: discord.Attachment):
@@ -2189,32 +2020,24 @@ async def importconfig(interaction: discord.Interaction, file: discord.Attachmen
     except (json.JSONDecodeError, UnicodeDecodeError):
         await interaction.followup.send("❌ File JSON không hợp lệ hoặc bị lỗi encoding.", ephemeral=True)
         return
-
     if not isinstance(data, dict):
         await interaction.followup.send("❌ Nội dung JSON phải là một object cấu hình.", ephemeral=True)
         return
-
-    # Chỉ import các key đã biết trong DEFAULTS để tránh rác/độc hại lẫn vào settings
     merged = {**DEFAULTS}
     imported_keys = []
     for k, v in data.items():
         if k in DEFAULTS:
             merged[k] = v
             imported_keys.append(k)
-
     settings[str(interaction.guild.id)] = merged
     await save()
     await interaction.followup.send(f"✅ Đã import {len(imported_keys)} cấu hình từ file.", ephemeral=True)
-
-
 @bot.tree.command(name="health", description="Xem tình trạng hoạt động của bot (RAM, ping, uptime, thống kê)")
 @admin_only()
 async def health(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-
     uptime_seconds = int(time.time() - bot.start_time)
     uptime_str = str(datetime.timedelta(seconds=uptime_seconds))
-
     ram_mb = None
     cpu_percent = None
     try:
@@ -2224,10 +2047,8 @@ async def health(interaction: discord.Interaction):
         cpu_percent = process.cpu_percent(interval=0.3)
     except ImportError:
         pass
-
     guild_stats = stats.get(str(interaction.guild.id), {})
     today = guild_stats.get(_today_key(), {})
-
     embed = discord.Embed(title="🩺 Health Check", color=discord.Color.green())
     embed.add_field(name="Ping", value=f"{round(bot.latency * 1000)}ms", inline=True)
     embed.add_field(name="Uptime", value=uptime_str, inline=True)
@@ -2239,14 +2060,11 @@ async def health(interaction: discord.Interaction):
     embed.add_field(name="Bot bị ban hôm nay", value=str(today.get("bot_banned", 0)), inline=True)
     embed.add_field(name="Nuke chặn hôm nay", value=str(today.get("nuke_blocked", 0)), inline=True)
     await interaction.followup.send(embed=embed, ephemeral=True)
-
-
 @bot.tree.command(name="stats", description="Xem thống kê hoạt động bảo mật theo ngày")
 @admin_only()
 async def statscommand(interaction: discord.Interaction, days: int = 7):
     days = max(1, min(days, 30))
     guild_stats = stats.get(str(interaction.guild.id), {})
-
     today = datetime.datetime.utcnow().date()
     metrics_order = [
         ("raid_blocked", "Raid bị chặn"),
@@ -2265,14 +2083,12 @@ async def statscommand(interaction: discord.Interaction, days: int = 7):
         ("timeout", "Timeout"),
         ("ban", "Ban"),
     ]
-
     totals = defaultdict(int)
     for i in range(days):
         day_key = (today - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
         day_data = guild_stats.get(day_key, {})
         for metric, _ in metrics_order:
             totals[metric] += day_data.get(metric, 0)
-
     embed = discord.Embed(title=f"📈 Thống kê {days} ngày gần nhất", color=discord.Color.blurple())
     for metric, label in metrics_order:
         if totals[metric] > 0:
@@ -2280,8 +2096,6 @@ async def statscommand(interaction: discord.Interaction, days: int = 7):
     if not embed.fields:
         embed.description = "Chưa có dữ liệu thống kê trong khoảng thời gian này."
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
 @bot.tree.command(name="status", description="Xem cấu hình bảo mật hiện tại")
 @admin_only()
 async def status(interaction: discord.Interaction):
@@ -2319,17 +2133,12 @@ async def status(interaction: discord.Interaction):
     last_backup = backups.get(str(interaction.guild.id), {}).get("timestamp")
     embed.add_field(name="Backup gần nhất", value=(discord.utils.format_dt(datetime.datetime.fromtimestamp(last_backup, tz=datetime.timezone.utc), style="R") if last_backup else "chưa có"), inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# ---------------------------------------------------------------- run ------
 @bot.event
 async def setup_hook():
     bot.loop.create_task(raid_cooldown_loop())
     bot.loop.create_task(backup_snapshot_loop())
     bot.loop.create_task(cleanup_loop())
     bot.loop.create_task(stats_save_loop())
-
-
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Thiếu DISCORD_TOKEN trong biến môi trường.")

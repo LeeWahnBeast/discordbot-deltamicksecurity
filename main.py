@@ -77,6 +77,7 @@ DEFAULTS = {
     "auto_ban_suspicious_bots": True,
     "suspicion_ban_threshold": 100,
     "suspicion_timeout_threshold": 50,
+    "suspicion_warning_threshold": 20,
     "suspicion_decay_seconds": 600,
     "zalgo_max_combining_chars": 8,
     "lockdown_active": False,
@@ -137,7 +138,7 @@ CONFIGURABLE_INT_KEYS = [
     "intermittent_spam_burst_size", "intermittent_spam_burst_gap", "intermittent_spam_quiet_gap",
     "intermittent_spam_burst_count", "intermittent_spam_window", "intermittent_spam_timeout_seconds",
     "mass_mention_threshold", "mass_mention_timeout_seconds", "invite_new_account_days",
-    "suspicion_ban_threshold", "suspicion_timeout_threshold", "suspicion_decay_seconds",
+    "suspicion_ban_threshold", "suspicion_timeout_threshold", "suspicion_warning_threshold", "suspicion_decay_seconds",
     "zalgo_max_combining_chars", "backup_snapshot_interval_seconds",
     "max_webhooks_per_guild", "webhook_create_threshold", "webhook_create_window",
     "join_pattern_window", "join_pattern_min_count",
@@ -575,21 +576,35 @@ def add_suspicion(guild_id: int, user_id: int, category: str, decay_seconds: int
     score += points
     suspicion_scores[key] = [score, now]
     return int(score)
+_warned_users: set[tuple[int, int]] = set()
 def cleanup_suspicion_scores(max_age_seconds: int = 3600):
     now = time.time()
     stale = [k for k, (_, ts) in suspicion_scores.items() if now - ts > max_age_seconds]
     for k in stale:
         del suspicion_scores[k]
+        _warned_users.discard(k)
 async def apply_suspicion_consequence(guild: discord.Guild, member: discord.Member, score: int, s: dict):
+    key = (guild.id, member.id)
     if score >= s["suspicion_ban_threshold"]:
+        _warned_users.discard(key)
         await safe_action(member.ban(reason=f"Suspicion score vượt ngưỡng ({score})"), action_name="ban high suspicion user", guild_id=guild.id)
         bump_stat(guild.id, "ban", 1)
         await log(guild, f"⛔ {member.mention} bị ban do điểm nghi ngờ tích lũy vượt ngưỡng (**{score}** điểm)", discord.Color.dark_red(), critical=True)
     elif score >= s["suspicion_timeout_threshold"]:
+        _warned_users.discard(key)
         until = discord.utils.utcnow() + datetime.timedelta(minutes=15)
         await safe_action(member.timeout(until, reason=f"Suspicion score cao ({score})"), action_name="timeout high suspicion user", guild_id=guild.id)
         bump_stat(guild.id, "timeout", 1)
         await log(guild, f"⏱️ {member.mention} bị timeout do điểm nghi ngờ cao (**{score}** điểm)", discord.Color.orange())
+    elif score >= s.get("suspicion_warning_threshold", 20):
+        # Bậc "Nhẹ": chỉ cảnh cáo, KHÔNG mute/kick/ban — đúng thang hình phạt của server.
+        if key not in _warned_users:
+            _warned_users.add(key)
+            bump_stat(guild.id, "warning", 1)
+            await log(guild, f"🟢 {member.mention} nhận **cảnh cáo** do có dấu hiệu vi phạm (**{score}** điểm, chưa đủ ngưỡng phạt)", discord.Color.green())
+            await dm_warning(member, "bạn vừa nhận một cảnh cáo do vi phạm nội quy. Vi phạm tiếp sẽ bị cách ly (timeout) hoặc nặng hơn.")
+    else:
+        _warned_users.discard(key)
 async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
     if url in _webhook_cache:
         return _webhook_cache[url]
@@ -1425,7 +1440,7 @@ async def on_message(message: discord.Message):
         member = resolved
     is_other_bot = member.bot
     guild_id = message.guild.id
-    if is_other_bot and is_whitelisted_bot(guild_id, member.id):
+    if is_other_bot and (is_whitelisted_bot(guild_id, member.id) or _is_discord_verified_bot(member)):
         return
     if not is_other_bot and is_protected(member, guild_id):
         return

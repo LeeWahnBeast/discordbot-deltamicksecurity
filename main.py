@@ -958,6 +958,13 @@ async def on_member_join(member: discord.Member):
                 await log(guild, f"🤖⛔ Đã ban bot khả nghi `{member.id}` — lý do: {reason}", discord.Color.dark_red())
                 bump_stat(guild.id, "bot_banned", 1)
                 return
+        await log(
+            guild,
+            f"🤖 Bot mới tham gia: `{member}` (`{member.id}`) — chưa có badge Verified, chưa nằm trong whitelist/blocklist. "
+            f"Dùng `/whitelistbot` nếu tin tưởng, hoặc `/blockbot` nếu muốn chặn.",
+            discord.Color.blurple(),
+        )
+        return
     now = time.time()
     joins = recent_joins[guild.id]
     joins.append(now)
@@ -1685,13 +1692,14 @@ async def on_message(message: discord.Message):
             if is_other_bot:
                 await softban(message.guild, member, reason="Anti-spam: bot lặp lại cùng nội dung", delete_seconds=s["raid_softban_delete_seconds"])
             else:
-                until = discord.utils.utcnow() + datetime.timedelta(seconds=s["slow_spam_timeout_seconds"])
-                await safe_action(
-                    member.timeout(until, reason="Anti-spam: lặp lại cùng 1 nội dung nhiều lần"),
-                    action_name="timeout slow spammer",
-                    guild_id=guild_id,
-                )
                 score = add_suspicion(guild_id, member.id, "spam_slow", s["suspicion_decay_seconds"])
+                if score >= s["suspicion_timeout_threshold"]:
+                    until = discord.utils.utcnow() + datetime.timedelta(seconds=s["slow_spam_timeout_seconds"])
+                    await safe_action(
+                        member.timeout(until, reason="Anti-spam: lặp lại cùng 1 nội dung nhiều lần"),
+                        action_name="timeout slow spammer",
+                        guild_id=guild_id,
+                    )
                 await apply_suspicion_consequence(message.guild, member, score, s)
             verdict = (
                 f"➡️ **Kết luận: cùng 1 người ({member.mention}) đã rải nội dung này qua "
@@ -2005,6 +2013,46 @@ async def listblockedbots(interaction: discord.Interaction):
         return
     text = ", ".join(f"`{b}`" for b in s["blocked_bot_ids"])
     await interaction.response.send_message(f"**Bot bị chặn ({len(s['blocked_bot_ids'])}):**\n{text}", ephemeral=True)
+@bot.tree.command(name="listbots", description="Quét toàn bộ bot đang có trong server và gửi báo cáo lên log channel (không ban)")
+@admin_only()
+async def listbots(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    s = cfg(interaction.guild.id)
+    blocked_ids = set(s["blocked_bot_ids"])
+    bots = [m for m in interaction.guild.members if m.bot]
+    if not bots:
+        await interaction.followup.send("Server này không có bot nào.", ephemeral=True)
+        return
+    lines = []
+    for member in sorted(bots, key=lambda m: m.joined_at or discord.utils.utcnow()):
+        tags = []
+        if _is_discord_verified_bot(member):
+            tags.append("✓ Discord verified")
+        if member.id in blocked_ids:
+            tags.append("⛔ blocklist")
+        if is_whitelisted_bot(interaction.guild.id, member.id):
+            tags.append("✅ whitelist")
+        if is_protected(member, interaction.guild.id):
+            tags.append("🛡️ protected")
+        sus = _is_suspicious_bot(member)
+        if sus and not _is_discord_verified_bot(member):
+            tags.append(f"⚠️ {sus}")
+        joined = discord.utils.format_dt(member.joined_at, style="R") if member.joined_at else "?"
+        tag_text = f" [{', '.join(tags)}]" if tags else ""
+        lines.append(f"• {member.mention} `{member}` (`{member.id}`) — vào server {joined}{tag_text}")
+    header = f"🤖📋 **Danh sách bot trong server** — tổng cộng **{len(bots)}** bot:\n"
+    chunk = header
+    chunks = []
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            chunks.append(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        chunks.append(chunk)
+    for i, c in enumerate(chunks):
+        await log(interaction.guild, c, discord.Color.blurple())
+    await interaction.followup.send(f"✅ Đã quét {len(bots)} bot và gửi báo cáo lên log channel.", ephemeral=True)
 @bot.tree.command(name="scanbots", description="Quét bot đang có trong server, ban những bot khớp blocklist hoặc tên khả nghi")
 @admin_only()
 async def scanbots(interaction: discord.Interaction):

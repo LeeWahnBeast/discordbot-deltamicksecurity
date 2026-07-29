@@ -45,6 +45,7 @@ db = _make_firestore_client()
 SETTINGS_COLLECTION = "settings"
 BACKUP_COLLECTION = "backups"
 STATS_COLLECTION = "stats"
+JAILS_COLLECTION = "jails"
 DEFAULTS = {
     "log_channel_id": None,
     "log_webhook_url": None,
@@ -73,9 +74,17 @@ DEFAULTS = {
     "mass_mention_threshold": 6,
     "mass_mention_timeout_seconds": 600,
     "invite_new_account_days": 3,
-    "badwords": [],
+    "badwords": [
+        "vcl", "vloz", "vloc", "clm", "dcm", "dmm", "cmm", "đm", "đmm", "đù mẹ", "đù má",
+        "đéo", "đĩ", "đĩ mẹ", "lồn", "cặc", "buồi", "đầu buồi", "súc vật", "chó chết",
+        "óc chó", "thằng chó", "con đĩ", "đồ khốn", "khốn nạn", "mất dạy", "vô học",
+        "óc lợn", "não phẳng", "ngu như chó", "đĩ mẹ mày", "địt", "địt mẹ", "đm mày",
+    ],
     "ai_moderation_enabled": False,
     "ai_moderation_action": "delete",
+    "jail_role_id": 1528557547760521266,
+    "jail_announce_channel_id": 1528557774597001298,
+    "jail_duration_hours": 24,
     "scam_domains": [],
     "blocked_bot_ids": [],
     "auto_ban_suspicious_bots": True,
@@ -205,10 +214,11 @@ REDIRECT_DOMAINS = {
 settings: dict = {}
 backups: dict = {}
 stats: dict = {}
+jails: dict = {}  # {guild_id_str: {user_id_str: {"removed_role_ids": [...], "release_at": epoch_seconds}}}
 _dirty_stats_guilds: set[str] = set()
 
 def _load_all_sync():
-    global settings, backups, stats
+    global settings, backups, stats, jails
     settings = {}
     for doc in db.collection(SETTINGS_COLLECTION).stream():
         settings[doc.id] = doc.to_dict() or {}
@@ -221,6 +231,9 @@ def _load_all_sync():
         stats[gid] = {}
         for day_doc in db.collection(STATS_COLLECTION).document(gid).collection("days").stream():
             stats[gid][day_doc.id] = day_doc.to_dict() or {}
+    jails = {}
+    for doc in db.collection(JAILS_COLLECTION).stream():
+        jails[doc.id] = doc.to_dict() or {}
 
 def cfg(guild_id: int) -> dict:
     g = settings.setdefault(str(guild_id), {})
@@ -262,6 +275,13 @@ async def save_backup():
         await asyncio.to_thread(_save_backup_sync)
     except Exception:
         logger.exception("Không thể lưu backup lên Firestore")
+def _save_guild_jail_sync(guild_id: str, data: dict):
+    db.collection(JAILS_COLLECTION).document(guild_id).set(data)
+async def save_guild_jail(guild_id: int):
+    try:
+        await asyncio.to_thread(_save_guild_jail_sync, str(guild_id), jails.get(str(guild_id), {}))
+    except Exception:
+        logger.exception("Không thể lưu jail record lên Firestore cho guild %s", guild_id)
 def _save_guild_backup_sync(guild_id: str, data: dict):
     db.collection(BACKUP_COLLECTION).document(guild_id).set(data)
 async def save_guild_backup(guild_id: int):
@@ -309,6 +329,7 @@ recent_message_contents = defaultdict(deque)
 message_timeline = defaultdict(deque)
 raid_state = {}
 suspicion_scores: dict[tuple[int, int], list] = {}
+card_tally: dict[tuple[int, int], dict] = {}  # {(guild_id, user_id): {"yellow": int, "red": int}}
 _webhook_cache: dict[str, discord.Webhook] = {}
 recent_role_grants = defaultdict(deque)
 recent_bans = defaultdict(deque)
@@ -455,6 +476,7 @@ def normalize(text: str) -> str:
     text = unicodedata.normalize("NFD", text)
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     text = text.translate(LEET_MAP)
+    text = re.sub(r"\d", "", text)
     return text
 def _strip_non_alnum(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", "", text)
@@ -484,8 +506,16 @@ _UNSAFE_CATEGORY_LABELS = {
     "S9": "Nội dung độc hại khác", "S10": "Quấy rối", "S11": "Thông tin sai lệch", "S12": "Nội dung khiêu dâm",
     "S13": "An toàn bầu cử", "S14": "Lạm dụng qua code",
 }
-async def check_toxic_groq(content: str) -> tuple[bool, str] | None:
-    """Gọi Groq (Llama Guard) để phân loại nội dung độc hại. Trả về None nếu lỗi/timeout (fail-open)."""
+# Điểm nghiêm trọng theo từng danh mục — nhóm nặng (trẻ em, bạo lực, tự hại, vũ khí) cho điểm cao hẳn
+# để bị xử lý (thẻ đỏ) ngay từ lần đầu, thay vì phải tích lũy nhiều lần như vi phạm nhẹ.
+_CATEGORY_SEVERITY = {
+    "S4": 100, "S1": 60, "S7": 60, "S5": 60, "S2": 60,
+    "S8": 35, "S10": 30, "S3": 30, "S12": 30,
+    "S9": 20, "S11": 15, "S6": 15, "S13": 15, "S14": 20,
+}
+async def check_toxic_groq(content: str) -> tuple[bool, str, int] | None:
+    """Gọi Groq (Llama Guard) để phân loại nội dung độc hại.
+    Trả về (is_unsafe, nhãn danh mục tiếng Việt, điểm nghiêm trọng) hoặc None nếu lỗi/timeout (fail-open)."""
     if not GROQ_API_KEY or not content or not content.strip():
         return None
     try:
@@ -511,8 +541,9 @@ async def check_toxic_groq(content: str) -> tuple[bool, str] | None:
         if text.lower().startswith("unsafe"):
             cat_codes = re.findall(r"S\d+", text)
             labels = [_UNSAFE_CATEGORY_LABELS.get(c, c) for c in cat_codes] or ["Không rõ danh mục"]
-            return True, ", ".join(labels)
-        return False, ""
+            severity = max((_CATEGORY_SEVERITY.get(c, 25) for c in cat_codes), default=25)
+            return True, ", ".join(labels), severity
+        return False, "", 0
     except asyncio.TimeoutError:
         logger.warning("Groq moderation timeout")
         return None
@@ -627,8 +658,8 @@ def is_protected(member: discord.abc.User, guild_id: int | None = None) -> bool:
     if guild_id is not None and is_whitelisted_member_by_role(guild_id, member):
         return True
     return member.guild_permissions.administrator
-def add_suspicion(guild_id: int, user_id: int, category: str, decay_seconds: int) -> int:
-    points = SUSPICION_WEIGHTS.get(category, 10)
+def add_suspicion(guild_id: int, user_id: int, category: str, decay_seconds: int, points_override: int | None = None) -> int:
+    points = points_override if points_override is not None else SUSPICION_WEIGHTS.get(category, 10)
     key = (guild_id, user_id)
     now = time.time()
     entry = suspicion_scores.get(key)
@@ -650,26 +681,116 @@ def cleanup_suspicion_scores(max_age_seconds: int = 3600):
     for k in stale:
         del suspicion_scores[k]
         _warned_users.discard(k)
+        card_tally.pop(k, None)
+async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, reason_text: str):
+    """Tước tạm toàn bộ role hiện có, gán role tù nhân, và hẹn giờ trả lại sau N giờ."""
+    jail_role_id = s.get("jail_role_id")
+    jail_role = guild.get_role(jail_role_id) if jail_role_id else None
+    if jail_role is None:
+        logger.warning("Jail role %s không tồn tại ở guild %s — bỏ qua giam giữ", jail_role_id, guild.id)
+        return False
+    removable = [r for r in member.roles if r != guild.default_role and r.id != jail_role_id and r < guild.me.top_role]
+    removed_ids = [r.id for r in removable]
+    if removable:
+        await safe_action(member.remove_roles(*removable, reason=f"Jail: {reason_text}"), action_name="strip roles for jail", guild_id=guild.id)
+    await safe_action(member.add_roles(jail_role, reason=f"Jail: {reason_text}"), action_name="add jail role", guild_id=guild.id)
+    hours = s.get("jail_duration_hours", 24)
+    release_at = time.time() + hours * 3600
+    gid_key = str(guild.id)
+    jails.setdefault(gid_key, {})[str(member.id)] = {"removed_role_ids": removed_ids, "release_at": release_at}
+    await save_guild_jail(guild.id)
+    channel_id = s.get("jail_announce_channel_id")
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel:
+        await safe_action(
+            channel.send(f"🔒 {member.mention} đã bị giam **{hours} giờ** vì {reason_text}. Bạn không thể sử dụng `llaudon` vì bạn là tù nhân đặc biệt."),
+            action_name="announce jail", guild_id=guild.id,
+        )
+    return True
+async def release_from_jail(guild: discord.Guild, user_id: int, record: dict):
+    jail_role_id = cfg(guild.id).get("jail_role_id")
+    jail_role = guild.get_role(jail_role_id) if jail_role_id else None
+    member = guild.get_member(user_id)
+    if member is None:
+        member = await safe_action(guild.fetch_member(user_id), action_name="fetch jailed member for release", guild_id=guild.id)
+    if member is not None:
+        if jail_role and jail_role in member.roles:
+            await safe_action(member.remove_roles(jail_role, reason="Hết hạn giam giữ"), action_name="remove jail role", guild_id=guild.id)
+        restore_roles = [guild.get_role(rid) for rid in record.get("removed_role_ids", [])]
+        restore_roles = [r for r in restore_roles if r is not None]
+        if restore_roles:
+            await safe_action(member.add_roles(*restore_roles, reason="Hết hạn giam giữ: trả lại role cũ"), action_name="restore roles after jail", guild_id=guild.id)
+        await log(guild, f"🔓 {member.mention} đã mãn hạn tù, được trả lại role cũ.", discord.Color.green())
+    gid_key = str(guild.id)
+    jails.get(gid_key, {}).pop(str(user_id), None)
+    await save_guild_jail(guild.id)
+async def jail_release_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = time.time()
+        for gid_key, records in list(jails.items()):
+            guild = bot.get_guild(int(gid_key))
+            if guild is None:
+                continue
+            for uid_key, record in list(records.items()):
+                if record.get("release_at", 0) <= now:
+                    await release_from_jail(guild, int(uid_key), record)
+        await asyncio.sleep(300)
+def get_card_group(score: int, s: dict) -> str:
+    """Xếp điểm vi phạm vào nhóm: nhẹ / thẻ vàng / thẻ đỏ — dùng cho hiển thị & quyết định."""
+    if score >= s["suspicion_ban_threshold"]:
+        return "red"
+    elif score >= s["suspicion_timeout_threshold"]:
+        return "yellow"
+    elif score >= s.get("suspicion_warning_threshold", 20):
+        return "notice"
+    return "clean"
 async def apply_suspicion_consequence(guild: discord.Guild, member: discord.Member, score: int, s: dict):
     key = (guild.id, member.id)
-    if score >= s["suspicion_ban_threshold"]:
+    group = get_card_group(score, s)
+    tally = card_tally.setdefault(key, {"yellow": 0, "red": 0})
+    if group == "red":
+        tally["red"] += 1
         _warned_users.discard(key)
-        await safe_action(member.ban(reason=f"Suspicion score vượt ngưỡng ({score})"), action_name="ban high suspicion user", guild_id=guild.id)
-        bump_stat(guild.id, "ban", 1)
-        await log(guild, f"⛔ {member.mention} bị ban do điểm nghi ngờ tích lũy vượt ngưỡng (**{score}** điểm)", discord.Color.dark_red(), critical=True)
-    elif score >= s["suspicion_timeout_threshold"]:
+        if tally["red"] >= 3:
+            jailed = await jail_member(guild, member, s, f"nhận thẻ đỏ lần {tally['red']} (điểm vi phạm {score})")
+            bump_stat(guild.id, "jail", 1)
+            if jailed:
+                await log(guild, f"⛓️🟥 {member.mention} nhận **THẺ ĐỎ LẦN {tally['red']}** → **BỎ TÙ {s.get('jail_duration_hours', 24)} giờ**, tước toàn bộ role tạm thời (**{score}** điểm, nhóm: đỏ)", discord.Color.dark_red(), critical=True)
+            else:
+                await safe_action(member.ban(reason=f"Thẻ đỏ lần {tally['red']} — điểm vi phạm {score} (jail role chưa cấu hình)"), action_name="ban after 3rd red card fallback", guild_id=guild.id)
+                bump_stat(guild.id, "ban", 1)
+                await log(guild, f"⛔🟥 {member.mention} nhận **THẺ ĐỎ LẦN {tally['red']}** → BAN vĩnh viễn (chưa cấu hình role tù, dùng ban dự phòng) (**{score}** điểm)", discord.Color.dark_red(), critical=True)
+        elif tally["red"] == 2:
+            until = discord.utils.utcnow() + datetime.timedelta(hours=1)
+            await safe_action(member.timeout(until, reason=f"Thẻ đỏ lần 2 — điểm vi phạm {score}"), action_name="timeout on 2nd red card", guild_id=guild.id)
+            bump_stat(guild.id, "timeout", 1)
+            tally["yellow"] = 0
+            await log(guild, f"🟥🟥 {member.mention} nhận **THẺ ĐỎ LẦN 2** → truất quyền thi đấu **1 giờ** (**{score}** điểm, nhóm: đỏ). Thẻ đỏ tiếp theo = BAN vĩnh viễn.", discord.Color.dark_red(), critical=True)
+        else:
+            until = discord.utils.utcnow() + datetime.timedelta(minutes=15)
+            await safe_action(member.timeout(until, reason=f"Thẻ đỏ — điểm vi phạm {score}"), action_name="timeout on red card", guild_id=guild.id)
+            bump_stat(guild.id, "timeout", 1)
+            tally["yellow"] = 0
+            await log(guild, f"🟥 {member.mention} nhận **THẺ ĐỎ** → truất quyền thi đấu 15 phút (**{score}** điểm, nhóm: đỏ). Thẻ đỏ tiếp theo = mute 1 giờ.", discord.Color.dark_red(), critical=True)
+    elif group == "yellow":
+        tally["yellow"] += 1
         _warned_users.discard(key)
-        until = discord.utils.utcnow() + datetime.timedelta(minutes=15)
-        await safe_action(member.timeout(until, reason=f"Suspicion score cao ({score})"), action_name="timeout high suspicion user", guild_id=guild.id)
-        bump_stat(guild.id, "timeout", 1)
-        await log(guild, f"⏱️ {member.mention} bị timeout do điểm nghi ngờ cao (**{score}** điểm)", discord.Color.orange())
-    elif score >= s.get("suspicion_warning_threshold", 20):
-        # Bậc "Nhẹ": chỉ cảnh cáo, KHÔNG mute/kick/ban — đúng thang hình phạt của server.
+        if tally["yellow"] >= 2:
+            tally["yellow"] = 0
+            tally["red"] += 1
+            until = discord.utils.utcnow() + datetime.timedelta(minutes=15)
+            await safe_action(member.timeout(until, reason=f"2 thẻ vàng = 1 thẻ đỏ — điểm vi phạm {score}"), action_name="timeout on double yellow", guild_id=guild.id)
+            bump_stat(guild.id, "timeout", 1)
+            await log(guild, f"🟨🟨→🟥 {member.mention} nhận **THẺ VÀNG THỨ 2** → tự động gộp thành **THẺ ĐỎ**, truất quyền 15 phút (**{score}** điểm)", discord.Color.dark_red(), critical=True)
+        else:
+            await log(guild, f"🟨 {member.mention} nhận **THẺ VÀNG ({tally['yellow']}/2)** do điểm vi phạm cao (**{score}** điểm, nhóm: vàng)", discord.Color.orange())
+    elif group == "notice":
         if key not in _warned_users:
             _warned_users.add(key)
             bump_stat(guild.id, "warning", 1)
-            await log(guild, f"🟢 {member.mention} nhận **cảnh cáo** do có dấu hiệu vi phạm (**{score}** điểm, chưa đủ ngưỡng phạt)", discord.Color.green())
-            await dm_warning(member, "bạn vừa nhận một cảnh cáo do vi phạm nội quy. Vi phạm tiếp sẽ bị cách ly (timeout) hoặc nặng hơn.")
+            await log(guild, f"🟢 {member.mention} nhận **cảnh cáo nhẹ** (nhóm: xanh, **{score}** điểm, chưa đủ ngưỡng thẻ vàng)", discord.Color.green())
+            await dm_warning(member, "bạn vừa nhận một cảnh cáo do vi phạm nội quy. Vi phạm tiếp sẽ nhận thẻ vàng, 2 thẻ vàng = thẻ đỏ.")
     else:
         _warned_users.discard(key)
 async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
@@ -1679,15 +1800,17 @@ async def on_message(message: discord.Message):
         if s.get("ai_moderation_enabled") and GROQ_API_KEY:
             ai_result = await check_toxic_groq(check_content)
             if ai_result and ai_result[0]:
-                categories = ai_result[1]
+                _, categories, severity = ai_result
                 action = s.get("ai_moderation_action", "delete")
                 await safe_action(message.delete(), action_name="delete AI-flagged toxic message", guild_id=guild_id)
-                score = add_suspicion(guild_id, member.id, "ai_toxic", s["suspicion_decay_seconds"])
+                score = add_suspicion(guild_id, member.id, "ai_toxic", s["suspicion_decay_seconds"], points_override=severity)
                 bump_stat(guild_id, "ai_toxic_blocked", 1)
-                if action == "timeout":
+                group = get_card_group(score, s)
+                group_label = {"red": "🟥 nhóm ĐỎ", "yellow": "🟨 nhóm VÀNG", "notice": "🟢 nhóm cảnh cáo"}.get(group, "chưa xếp nhóm")
+                if action == "timeout" and group == "clean":
                     until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
                     await safe_action(member.timeout(until, reason=f"AI moderation: {categories}"), action_name="timeout AI-flagged member", guild_id=guild_id)
-                await log(message.guild, f"🤖⚠️ AI (Groq) phát hiện nội dung độc hại ({categories}) từ {member.mention}", discord.Color.gold())
+                await log(message.guild, f"🤖⚠️ AI (Groq) phát hiện nội dung độc hại ({categories}, độ nghiêm trọng {severity} điểm, {group_label}) từ {member.mention}", discord.Color.gold())
                 await apply_suspicion_consequence(message.guild, member, score, s)
                 await dm_warning(member, f"nội dung bị AI đánh giá là độc hại ({categories}).")
                 return
@@ -1935,6 +2058,32 @@ async def setlogwebhook(interaction: discord.Interaction, url: str):
     await set_and_save(interaction.guild.id, "log_webhook_url", url)
     _webhook_cache.pop(url, None)
     await interaction.response.send_message("✅ Đã đặt webhook log.", ephemeral=True)
+@bot.tree.command(name="setjailrole", description="Đặt role tù nhân dùng khi bỏ tù (thẻ đỏ lần 3)")
+@admin_only()
+async def setjailrole(interaction: discord.Interaction, role: discord.Role):
+    await set_and_save(interaction.guild.id, "jail_role_id", role.id)
+    await interaction.response.send_message(f"✅ Đã đặt role tù nhân: {role.mention}", ephemeral=True)
+@bot.tree.command(name="setjailchannel", description="Đặt kênh thông báo phạm nhân khi có người bị bỏ tù")
+@admin_only()
+async def setjailchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_and_save(interaction.guild.id, "jail_announce_channel_id", channel.id)
+    await interaction.response.send_message(f"✅ Đã đặt kênh thông báo phạm nhân: {channel.mention}", ephemeral=True)
+@bot.tree.command(name="setjailduration", description="Đặt thời gian bỏ tù (giờ)")
+@admin_only()
+async def setjailduration(interaction: discord.Interaction, hours: int):
+    await set_and_save(interaction.guild.id, "jail_duration_hours", max(1, hours))
+    await interaction.response.send_message(f"✅ Thời gian bỏ tù: {max(1, hours)} giờ", ephemeral=True)
+@bot.tree.command(name="unjail", description="Thả tù thủ công cho 1 thành viên, trả lại role cũ")
+@admin_only()
+async def unjail(interaction: discord.Interaction, member: discord.Member):
+    gid_key = str(interaction.guild.id)
+    record = jails.get(gid_key, {}).get(str(member.id))
+    if not record:
+        await interaction.response.send_message("❌ Người này không có trong danh sách bị giam.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await release_from_jail(interaction.guild, member.id, record)
+    await interaction.followup.send(f"✅ Đã thả tù {member.mention} và trả lại role cũ.", ephemeral=True)
 @bot.tree.command(name="togglealertowner", description="Bật/tắt DM cho owner khi có sự cố nghiêm trọng")
 @admin_only()
 async def togglealertowner(interaction: discord.Interaction):
@@ -1942,6 +2091,38 @@ async def togglealertowner(interaction: discord.Interaction):
     new_val = not s.get("alert_owner_on_critical", True)
     await set_and_save(interaction.guild.id, "alert_owner_on_critical", new_val)
     await interaction.response.send_message(f"✅ Alert owner khi nghiêm trọng: {'Bật' if new_val else 'Tắt'}", ephemeral=True)
+@bot.tree.command(name="cardstatus", description="Xem thẻ phạt & điểm vi phạm hiện tại của 1 thành viên")
+@admin_only()
+async def cardstatus(interaction: discord.Interaction, member: discord.Member):
+    s = cfg(interaction.guild.id)
+    key = (interaction.guild.id, member.id)
+    entry = suspicion_scores.get(key)
+    score = int(entry[0]) if entry else 0
+    tally = card_tally.get(key, {"yellow": 0, "red": 0})
+    group = get_card_group(score, s)
+    group_label = {"red": "🟥 Đỏ", "yellow": "🟨 Vàng", "notice": "🟢 Cảnh cáo", "clean": "⚪ Sạch"}.get(group, "⚪ Sạch")
+    embed = discord.Embed(title=f"🎫 Thẻ phạt — {member.display_name}", color=discord.Color.blurple())
+    embed.add_field(name="Điểm vi phạm hiện tại", value=str(score), inline=True)
+    embed.add_field(name="Nhóm", value=group_label, inline=True)
+    embed.add_field(name="Thẻ vàng tích lũy", value=f"{tally['yellow']}/2", inline=True)
+    embed.add_field(name="Thẻ đỏ đã nhận", value=str(tally["red"]), inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+@bot.tree.command(name="testaimod", description="Test thử AI moderation (Groq) với 1 đoạn text, xem kết quả trực tiếp")
+@admin_only()
+async def testaimod(interaction: discord.Interaction, text: str):
+    if not GROQ_API_KEY:
+        await interaction.response.send_message("❌ Chưa cấu hình `GROQ_API_KEY` — không thể test.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await check_toxic_groq(text)
+    if result is None:
+        await interaction.followup.send("⚠️ Groq API lỗi hoặc timeout — kiểm tra `GROQ_API_KEY` / log console để biết chi tiết.", ephemeral=True)
+        return
+    is_unsafe, categories, severity = result
+    if is_unsafe:
+        await interaction.followup.send(f"🟨 **UNSAFE** — danh mục: {categories}\nĐộ nghiêm trọng: **{severity}** điểm (sẽ cộng vào điểm vi phạm của người gửi)", ephemeral=True)
+    else:
+        await interaction.followup.send("✅ **SAFE** — Groq đánh giá nội dung này bình thường.", ephemeral=True)
 @bot.tree.command(name="toggleaimod", description="Bật/tắt kiểm duyệt toxic bằng AI (Groq/Llama Guard)")
 @admin_only()
 async def toggleaimod(interaction: discord.Interaction):
@@ -2531,6 +2712,7 @@ async def setup_hook():
     bot.loop.create_task(cleanup_loop())
     bot.loop.create_task(stats_save_loop())
     bot.loop.create_task(duplicate_channel_scan_loop())
+    bot.loop.create_task(jail_release_loop())
     bot.add_view(SecurityPanelView())
 if __name__ == "__main__":
     if not TOKEN:

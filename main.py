@@ -144,6 +144,8 @@ DEFAULTS = {
     "audit_log_cache_ttl_seconds": 30,
     "duplicate_channel_threshold": 3,
     "duplicate_channel_scan_interval": 60,
+    "friendly_leaderboard_channel_id": None,
+    "friendly_leaderboard_last_posted_week": None,
 }
 CONFIGURABLE_INT_KEYS = [
     "raid_join_threshold", "raid_join_window", "raid_min_account_age_days", "raid_cooldown_seconds",
@@ -561,10 +563,15 @@ CỰC KỲ QUAN TRỌNG — TRÁNH BÁO ĐỘNG GIẢ (false positive). Server n
 - KHÔNG unsafe với lời trêu đùa nhẹ nhàng, thân mật giữa bạn bè không mang ác ý (vd: "mày ngốc quá =))", "thằng điên"
   kiểu đùa vui có emoji/cười kèm theo) — chỉ xếp S15 khi rõ ràng là công kích/miệt thị thật.
 - KHÔNG unsafe chỉ vì tin nhắn ngắn, viết tắt, không dấu, hoặc lạ — chỉ đánh dấu khi chắc chắn có từ/cụm từ vi phạm thật.
+- KHÔNG unsafe với thuật ngữ kỹ thuật/máy tính bình thường chỉ vì tình cờ chứa âm giống từ né-filter: "ổ C", "ổ D", "ổ đĩa",
+  "ổ cứng", "reset máy", "cài win", "driver", tên biến/lệnh code, tên ổ đĩa hay phân vùng — đây LUÔN LUÔN là safe, không
+  phải cách né chửi thề. Chỉ xếp S15/S16 khi từ đó xuất hiện với NGHĨA XÚC PHẠM rõ ràng trong câu, không phải vì phát âm
+  gần giống nhau.
 - Nếu KHÔNG CHẮC CHẮN hoặc bằng chứng mơ hồ, LUÔN LUÔN trả lời safe. Thà bỏ sót còn hơn xử oan người vô tội.
 
 Ví dụ SAFE (không được xếp unsafe): "gg tối nay đi ăn không", "thằng này chơi hay vãi", "cliff của map này đẹp",
-"t muốn kill con boss này quá", "haha mày ngu ghê =))", "stg tao thi được điểm cao luôn" (swear to god = thề, không tục ở đây).
+"t muốn kill con boss này quá", "haha mày ngu ghê =))", "stg tao thi được điểm cao luôn" (swear to god = thề, không tục ở đây),
+"ông chọn ổ C xong đổi ổ D" (đang nói về ổ đĩa máy tính, không phải né chửi thề).
 Ví dụ UNSAFE thật sự: "đm mày óc chó", "n1663r", "kys đi", "địt mẹ mày", "stfu thằng ngu".
 
 Ngoài ra, nếu nội dung AN TOÀN, hãy đánh giá thêm nó có phải lời nhắn THÂN THIỆN/tử tế/đẹp không
@@ -831,6 +838,61 @@ async def jail_release_loop():
                 if record.get("release_at", 0) <= now:
                     await release_from_jail(guild, int(uid_key), record)
         await asyncio.sleep(300)
+_VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
+def _current_vn_week_key(now_vn: datetime.datetime) -> str:
+    iso = now_vn.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+async def post_weekly_friendly_leaderboard(guild: discord.Guild, s: dict):
+    """Đăng bảng xếp hạng điểm Thân thiện hàng tuần — chỉ vinh danh, không bêu tên,
+    không tag ai, không có cột 'tội danh'."""
+    channel_id = s.get("friendly_leaderboard_channel_id")
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+    bucket = friendly.get(str(guild.id), {})
+    if not bucket:
+        return
+    rows = []
+    for uid_key, entry in bucket.items():
+        member = guild.get_member(int(uid_key))
+        if member is None or member.bot:
+            continue
+        score = entry.get("score", 0)
+        if score <= 0:
+            continue
+        rows.append((member, score))
+    if not rows:
+        return
+    rows.sort(key=lambda r: r[1], reverse=True)
+    top = rows[:10]
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (member, score) in enumerate(top):
+        prefix = medals[i] if i < len(medals) else f"`#{i+1}`"
+        lines.append(f"{prefix} **{member.display_name}** — {score} điểm")
+    embed = discord.Embed(
+        title="🌟 Bảng vinh danh Thân thiện tuần này",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    winner_name = top[0][0].display_name
+    embed.set_footer(text=f"🎉 Chúc mừng {winner_name} — thành viên thân thiện nhất tuần! • {guild.name}")
+    await safe_action(channel.send(embed=embed), action_name="post weekly friendly leaderboard", guild_id=guild.id)
+async def weekly_friendly_leaderboard_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now_vn = datetime.datetime.now(tz=_VN_TZ)
+        # Cửa sổ đăng: Chủ nhật (weekday()==6), từ 23:59 trở đi, mỗi tuần đăng đúng 1 lần.
+        if now_vn.weekday() == 6 and (now_vn.hour, now_vn.minute) >= (23, 59):
+            week_key = _current_vn_week_key(now_vn)
+            for guild in list(bot.guilds):
+                s = cfg(guild.id)
+                if s.get("friendly_leaderboard_last_posted_week") == week_key:
+                    continue
+                await post_weekly_friendly_leaderboard(guild, s)
+                await set_and_save(guild.id, "friendly_leaderboard_last_posted_week", week_key)
+        await asyncio.sleep(60)
 def get_card_group(score: int, s: dict) -> str:
     """Xếp điểm vi phạm vào nhóm: nhẹ / thẻ vàng / thẻ đỏ — dùng cho hiển thị & quyết định."""
     if score >= s["suspicion_ban_threshold"]:
@@ -933,6 +995,32 @@ def _build_log_embed(guild: discord.Guild, text: str, color, critical: bool) -> 
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     return embed
+async def forward_violation_content(guild: discord.Guild, message: discord.Message, reason_label: str):
+    """Chuyển tiếp nguyên văn tin nhắn (và ảnh/file đính kèm, nếu có) bị xóa vì vi phạm
+    vào kênh log, để mod xem lại nội dung gốc thay vì chỉ đọc mô tả tóm tắt."""
+    s = cfg(guild.id)
+    channel_id = s.get("log_channel_id")
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+    embed = discord.Embed(
+        title="🚨 Nội dung vi phạm bị xóa",
+        description=f"Lý do: **{reason_label}**\nNgười gửi: {message.author.mention}\nKênh gốc: {message.channel.mention if hasattr(message.channel, 'mention') else message.channel}",
+        color=discord.Color.dark_gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    if message.content:
+        embed.add_field(name="Nội dung gốc", value=message.content[:1024], inline=False)
+    files = []
+    try:
+        for att in message.attachments[:4]:
+            files.append(await att.to_file())
+    except (discord.HTTPException, discord.NotFound):
+        pass
+    try:
+        await channel.send(embed=embed, files=files if files else discord.utils.MISSING)
+    except discord.HTTPException:
+        logger.exception("Không thể chuyển tiếp nội dung vi phạm vào log channel ở guild %s", guild.id)
 async def log(guild: discord.Guild, text: str, color=discord.Color.blurple(), *, critical: bool = False):
     s = cfg(guild.id)
     embed = _build_log_embed(guild, text, color, critical)
@@ -1887,6 +1975,7 @@ async def on_message(message: discord.Message):
                 await safe_action(message.delete(), action_name="delete badword message", guild_id=guild_id)
                 morse_note = " (phát hiện qua giải mã Morse)" if morse_decoded else ""
                 await log(message.guild, f"🤬 Xóa tin nhắn chứa từ cấm (`{mask_word(hit_word)}`){morse_note} của {member.mention}", discord.Color.gold())
+                await forward_violation_content(message.guild, message, f"Từ cấm: `{mask_word(hit_word)}`{morse_note}")
                 bump_stat(guild_id, "badword_blocked", 1)
                 score = add_suspicion(guild_id, member.id, "badword", s["suspicion_decay_seconds"])
                 await apply_suspicion_consequence(message.guild, member, score, s)
@@ -1906,6 +1995,7 @@ async def on_message(message: discord.Message):
                     until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
                     await safe_action(member.timeout(until, reason=f"AI moderation: {categories}"), action_name="timeout AI-flagged member", guild_id=guild_id)
                 await log(message.guild, f"🤖⚠️ AI (Groq) phát hiện nội dung độc hại ({categories}, độ nghiêm trọng {severity} điểm, {group_label}) từ {member.mention}", discord.Color.gold())
+                await forward_violation_content(message.guild, message, f"AI phát hiện: {categories} ({severity} điểm)")
                 await apply_suspicion_consequence(message.guild, member, score, s)
                 await dm_warning(member, f"nội dung bị AI đánh giá là độc hại ({categories}).")
                 return
@@ -2171,6 +2261,21 @@ async def setjailchannel(interaction: discord.Interaction, channel: discord.Text
 async def setjailduration(interaction: discord.Interaction, hours: int):
     await set_and_save(interaction.guild.id, "jail_duration_hours", max(1, hours))
     await interaction.response.send_message(f"✅ Thời gian bỏ tù: {max(1, hours)} giờ", ephemeral=True)
+@bot.tree.command(name="setfriendlychannel", description="Đặt kênh đăng bảng vinh danh Thân thiện hàng tuần (Chủ nhật 23:59)")
+@admin_only()
+async def setfriendlychannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_and_save(interaction.guild.id, "friendly_leaderboard_channel_id", channel.id)
+    await interaction.response.send_message(f"✅ Đã đặt kênh vinh danh Thân thiện: {channel.mention}", ephemeral=True)
+@bot.tree.command(name="postfriendlyboard", description="Đăng thử bảng vinh danh Thân thiện ngay bây giờ (không chờ cuối tuần)")
+@admin_only()
+async def postfriendlyboard(interaction: discord.Interaction):
+    s = cfg(interaction.guild.id)
+    if not s.get("friendly_leaderboard_channel_id"):
+        await interaction.response.send_message("❌ Chưa đặt kênh — dùng `/setfriendlychannel` trước.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await post_weekly_friendly_leaderboard(interaction.guild, s)
+    await interaction.followup.send("✅ Đã đăng bảng vinh danh Thân thiện.", ephemeral=True)
 @bot.tree.command(name="unjail", description="Thả tù thủ công cho 1 thành viên, trả lại role cũ")
 @admin_only()
 async def unjail(interaction: discord.Interaction, member: discord.Member):
@@ -2939,6 +3044,7 @@ async def setup_hook():
     bot.loop.create_task(stats_save_loop())
     bot.loop.create_task(duplicate_channel_scan_loop())
     bot.loop.create_task(jail_release_loop())
+    bot.loop.create_task(weekly_friendly_leaderboard_loop())
     bot.add_view(SecurityPanelView())
 if __name__ == "__main__":
     if not TOKEN:

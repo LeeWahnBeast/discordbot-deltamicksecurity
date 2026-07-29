@@ -128,6 +128,8 @@ DEFAULTS = {
     "adaptive_trusted_min_age_days": 14,
     "adaptive_threshold_multiplier": 1.5,
     "audit_log_cache_ttl_seconds": 30,
+    "duplicate_channel_threshold": 3,
+    "duplicate_channel_window": 60,
 }
 CONFIGURABLE_INT_KEYS = [
     "raid_join_threshold", "raid_join_window", "raid_min_account_age_days", "raid_cooldown_seconds",
@@ -150,6 +152,7 @@ CONFIGURABLE_INT_KEYS = [
     "integration_delete_threshold", "integration_delete_window",
     "adaptive_trusted_action_count", "adaptive_trusted_min_age_days",
     "audit_log_cache_ttl_seconds",
+    "duplicate_channel_threshold", "duplicate_channel_window",
 ]
 SUSPICION_WEIGHTS = {
     "badword": 10,
@@ -175,6 +178,7 @@ SUSPICION_WEIGHTS = {
     "integration_delete": 75,
     "oauth_suspicious": 60,
     "selfbot": 40,
+    "duplicate_channel_spam": 80,
 }
 SUSPICIOUS_BOT_NAME_PATTERN = re.compile(
     r"^(none|null|undefined|nan|unknown)$", re.IGNORECASE
@@ -309,6 +313,7 @@ recent_webhook_creates = defaultdict(deque)
 recent_emoji_sticker_actions = defaultdict(deque)
 recent_automod_deletes = defaultdict(deque)
 recent_integration_deletes = defaultdict(deque)
+recent_channel_creates = defaultdict(deque)
 processed_audit_entries: dict[int, float] = {}
 guild_identity_snapshot: dict[int, dict] = {}
 actor_clean_action_count: dict[tuple[int, int], int] = defaultdict(int)
@@ -482,6 +487,18 @@ def normalize_for_dedupe(content: str) -> str:
     text = _DEDUPE_DIGIT_RE.sub("#", text)
     text = _DEDUPE_REPEAT_RE.sub(r"\1", text)
     text = re.sub(r"\s+", " ", text).strip()
+    return text
+def normalize_channel_name(name: str) -> str:
+    # Chống né anti-duplicate-channel bằng cách đổi emoji/ký tự trang trí:
+    # 「👽」Hidden, 「👀」Hidden, 「🤣」Hidden... đều phải ra cùng fingerprint "hidden".
+    if not name:
+        return ""
+    text = strip_invisible_chars(name).strip().lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = _DEDUPE_NOISE_RE.sub("", text)  # bỏ emoji + ký tự không phải chữ/số
+    text = re.sub(r"[\W_]+", "", text)     # bỏ luôn dấu gạch, khoảng trắng còn sót
+    text = _DEDUPE_REPEAT_RE.sub(r"\1", text)
     return text
 def _levenshtein(a: str, b: str) -> int:
     if a == b:
@@ -1315,6 +1332,33 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
             bump_stat(guild.id, "oauth_suspicious_blocked", 1)
         else:
             note_clean_actor_action(guild.id, actor.id)
+    if entry.action == discord.AuditLogAction.channel_create:
+        target = getattr(entry, "target", None)
+        ch_name = getattr(target, "name", None)
+        fingerprint = normalize_channel_name(ch_name) if ch_name else ""
+        if fingerprint:
+            key = (guild.id, actor.id)
+            bucket = recent_channel_creates[key]
+            bucket.append((now, fingerprint, target.id if target else None))
+            while bucket and now - bucket[0][0] > s["duplicate_channel_window"]:
+                bucket.popleft()
+            same_name = [b for b in bucket if b[1] == fingerprint]
+            threshold = adaptive_threshold(s["duplicate_channel_threshold"], guild, actor, member, s)
+            if len(same_name) >= threshold:
+                dup_ids = [b[2] for b in same_name if b[2] is not None]
+                bucket.clear()
+                _prune_empty(recent_channel_creates, key)
+                for cid in dup_ids:
+                    ch = guild.get_channel(cid)
+                    if ch:
+                        await safe_action(ch.delete(reason="Anti-nuke: channel trùng tên (né bằng emoji)"), action_name="delete duplicate-name channel", guild_id=guild.id)
+                await handle_mod_abuse(
+                    guild, actor, member, "duplicate_channel_spam",
+                    f"tạo {len(dup_ids)}+ kênh trùng tên `{fingerprint}` (chỉ đổi emoji) trong {s['duplicate_channel_window']}s"
+                )
+                return
+            else:
+                note_clean_actor_action(guild.id, actor.id)
     if entry.action == discord.AuditLogAction.channel_delete:
         target = getattr(entry, "target", None)
         ch_type = getattr(target, "type", None)
@@ -1379,6 +1423,7 @@ async def handle_mod_abuse(guild: discord.Guild, actor, member, category: str, r
         "emoji_sticker_nuke": "🛑 Emoji/Sticker Nuke",
         "automod_delete": "🛑 AutoMod Rule Delete Abuse",
         "integration_delete": "🛑 Integration Delete Abuse",
+        "duplicate_channel_spam": "🛑 Duplicate Channel Spam (né emoji)",
     }.get(category, "🛑 Hành vi phá hoại")
     await log(
         guild,
@@ -2224,6 +2269,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Mass ban/kick", value=f"{s['mass_ban_threshold']}/{s['mass_ban_window']}s — {s['mass_kick_threshold']}/{s['mass_kick_window']}s", inline=False)
     embed.add_field(name="Perm wipe", value=f"{s['perm_wipe_threshold']} sửa / {s['perm_wipe_window']}s", inline=False)
     embed.add_field(name="Webhook limit", value=f"{s['max_webhooks_per_guild']} max — {s['webhook_create_threshold']}/{s['webhook_create_window']}s = spam", inline=False)
+    embed.add_field(name="Duplicate channel (né emoji)", value=f"{s['duplicate_channel_threshold']} kênh trùng tên / {s['duplicate_channel_window']}s", inline=False)
     embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
     embed.add_field(name="Scam domains", value=str(len(s["scam_domains"])), inline=True)
     embed.add_field(name="Blocked bots", value=str(len(s["blocked_bot_ids"])), inline=True)

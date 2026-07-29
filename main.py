@@ -129,7 +129,7 @@ DEFAULTS = {
     "adaptive_threshold_multiplier": 1.5,
     "audit_log_cache_ttl_seconds": 30,
     "duplicate_channel_threshold": 3,
-    "duplicate_channel_window": 60,
+    "duplicate_channel_scan_interval": 60,
 }
 CONFIGURABLE_INT_KEYS = [
     "raid_join_threshold", "raid_join_window", "raid_min_account_age_days", "raid_cooldown_seconds",
@@ -152,7 +152,7 @@ CONFIGURABLE_INT_KEYS = [
     "integration_delete_threshold", "integration_delete_window",
     "adaptive_trusted_action_count", "adaptive_trusted_min_age_days",
     "audit_log_cache_ttl_seconds",
-    "duplicate_channel_threshold", "duplicate_channel_window",
+    "duplicate_channel_threshold", "duplicate_channel_scan_interval",
 ]
 SUSPICION_WEIGHTS = {
     "badword": 10,
@@ -313,9 +313,9 @@ recent_webhook_creates = defaultdict(deque)
 recent_emoji_sticker_actions = defaultdict(deque)
 recent_automod_deletes = defaultdict(deque)
 recent_integration_deletes = defaultdict(deque)
-recent_channel_creates = defaultdict(deque)
 processed_audit_entries: dict[int, float] = {}
 guild_identity_snapshot: dict[int, dict] = {}
+last_duplicate_channel_scan: dict[int, float] = {}
 actor_clean_action_count: dict[tuple[int, int], int] = defaultdict(int)
 def _prune_empty(d: defaultdict, key):
     if key in d and not d[key]:
@@ -850,6 +850,69 @@ async def cleanup_loop():
             for k in stale_keys:
                 del d[k]
         await asyncio.sleep(900)
+async def scan_guild_for_duplicate_channels(guild: discord.Guild, s: dict):
+    threshold = s.get("duplicate_channel_threshold", 3)
+    groups: dict[str, list] = defaultdict(list)
+    for ch in guild.channels:
+        if isinstance(ch, discord.CategoryChannel):
+            continue
+        fp = normalize_channel_name(getattr(ch, "name", "") or "")
+        if not fp:
+            continue
+        groups[fp].append(ch)
+    for fp, chans in groups.items():
+        if len(chans) < threshold:
+            continue
+        chans.sort(key=lambda c: c.created_at)
+        keep, extra = chans[0], chans[1:]
+        if not extra:
+            continue
+        actor = None
+        try:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.channel_create, limit=10):
+                if entry.target and entry.target.id == extra[-1].id:
+                    actor = entry.user
+                    break
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        for ch in extra:
+            await safe_action(
+                ch.delete(reason="Anti-nuke: channel trùng tên (né bằng emoji)"),
+                action_name="delete duplicate-name channel",
+                guild_id=guild.id,
+            )
+        bump_stat(guild.id, "duplicate_channel_blocked", len(extra))
+        actor_text = f"{actor.mention} (`{actor.id}`)" if actor else "không xác định được qua audit log"
+        await log(
+            guild,
+            f"🛑 **Duplicate Channel Spam** — phát hiện {len(chans)} kênh trùng tên `{fp}` "
+            f"(chỉ khác emoji/ký tự trang trí). Đã xoá {len(extra)} kênh, giữ lại {keep.mention}. "
+            f"Người tạo gần nhất: {actor_text}.",
+            discord.Color.dark_red(),
+            critical=True,
+        )
+        if actor and actor.id != bot.user.id:
+            member = guild.get_member(actor.id)
+            if not is_protected(member, guild.id) and not is_whitelisted_user(guild.id, actor.id):
+                add_suspicion(guild.id, actor.id, "duplicate_channel_spam", s.get("suspicion_decay_seconds", 600))
+async def duplicate_channel_scan_loop():
+    # Tick nhẹ (chỉ so sánh timestamp) — việc quét thật cho mỗi guild chỉ chạy
+    # đúng theo interval riêng của guild đó (mặc định 60s), dùng guild.channels
+    # có sẵn trong cache gateway nên không tốn thêm API call/CPU đáng kể.
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = time.time()
+        for guild in list(bot.guilds):
+            s = cfg(guild.id)
+            interval = s.get("duplicate_channel_scan_interval", 60)
+            if now - last_duplicate_channel_scan.get(guild.id, 0) < interval:
+                continue
+            last_duplicate_channel_scan[guild.id] = now
+            try:
+                await scan_guild_for_duplicate_channels(guild, s)
+            except Exception:
+                logger.exception("Lỗi quét duplicate channel cho guild %s", guild.id)
+        await asyncio.sleep(15)
 @bot.event
 async def on_ready():
     logger.info("Logged in as %s", bot.user)
@@ -1332,33 +1395,6 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
             bump_stat(guild.id, "oauth_suspicious_blocked", 1)
         else:
             note_clean_actor_action(guild.id, actor.id)
-    if entry.action == discord.AuditLogAction.channel_create:
-        target = getattr(entry, "target", None)
-        ch_name = getattr(target, "name", None)
-        fingerprint = normalize_channel_name(ch_name) if ch_name else ""
-        if fingerprint:
-            key = (guild.id, actor.id)
-            bucket = recent_channel_creates[key]
-            bucket.append((now, fingerprint, target.id if target else None))
-            while bucket and now - bucket[0][0] > s["duplicate_channel_window"]:
-                bucket.popleft()
-            same_name = [b for b in bucket if b[1] == fingerprint]
-            threshold = adaptive_threshold(s["duplicate_channel_threshold"], guild, actor, member, s)
-            if len(same_name) >= threshold:
-                dup_ids = [b[2] for b in same_name if b[2] is not None]
-                bucket.clear()
-                _prune_empty(recent_channel_creates, key)
-                for cid in dup_ids:
-                    ch = guild.get_channel(cid)
-                    if ch:
-                        await safe_action(ch.delete(reason="Anti-nuke: channel trùng tên (né bằng emoji)"), action_name="delete duplicate-name channel", guild_id=guild.id)
-                await handle_mod_abuse(
-                    guild, actor, member, "duplicate_channel_spam",
-                    f"tạo {len(dup_ids)}+ kênh trùng tên `{fingerprint}` (chỉ đổi emoji) trong {s['duplicate_channel_window']}s"
-                )
-                return
-            else:
-                note_clean_actor_action(guild.id, actor.id)
     if entry.action == discord.AuditLogAction.channel_delete:
         target = getattr(entry, "target", None)
         ch_type = getattr(target, "type", None)
@@ -2223,6 +2259,7 @@ async def statscommand(interaction: discord.Interaction, days: int = 7):
         ("mass_kick_blocked", "Mass-kick bị chặn"),
         ("perm_wipe_blocked", "Permission wipe bị chặn"),
         ("webhook_spam_blocked", "Webhook spam bị chặn"),
+        ("duplicate_channel_blocked", "Kênh trùng tên (né emoji) bị xoá"),
         ("role_escalation_blocked", "Role escalation bị chặn"),
         ("bot_banned", "Bot bị ban"),
         ("timeout", "Timeout"),
@@ -2269,7 +2306,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Mass ban/kick", value=f"{s['mass_ban_threshold']}/{s['mass_ban_window']}s — {s['mass_kick_threshold']}/{s['mass_kick_window']}s", inline=False)
     embed.add_field(name="Perm wipe", value=f"{s['perm_wipe_threshold']} sửa / {s['perm_wipe_window']}s", inline=False)
     embed.add_field(name="Webhook limit", value=f"{s['max_webhooks_per_guild']} max — {s['webhook_create_threshold']}/{s['webhook_create_window']}s = spam", inline=False)
-    embed.add_field(name="Duplicate channel (né emoji)", value=f"{s['duplicate_channel_threshold']} kênh trùng tên / {s['duplicate_channel_window']}s", inline=False)
+    embed.add_field(name="Duplicate channel (né emoji)", value=f"quét mỗi {s['duplicate_channel_scan_interval']}s — {s['duplicate_channel_threshold']}+ kênh trùng tên = xoá", inline=False)
     embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
     embed.add_field(name="Scam domains", value=str(len(s["scam_domains"])), inline=True)
     embed.add_field(name="Blocked bots", value=str(len(s["blocked_bot_ids"])), inline=True)
@@ -2290,6 +2327,7 @@ async def setup_hook():
     bot.loop.create_task(backup_snapshot_loop())
     bot.loop.create_task(cleanup_loop())
     bot.loop.create_task(stats_save_loop())
+    bot.loop.create_task(duplicate_channel_scan_loop())
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Thiếu DISCORD_TOKEN trong biến môi trường.")

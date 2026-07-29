@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 import asyncio
 import logging
 import unicodedata
@@ -18,6 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("securitybot")
 TOKEN = os.getenv("DISCORD_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
 PREFIX = os.getenv("PREFIX", "!")
 
@@ -72,6 +74,8 @@ DEFAULTS = {
     "mass_mention_timeout_seconds": 600,
     "invite_new_account_days": 3,
     "badwords": [],
+    "ai_moderation_enabled": False,
+    "ai_moderation_action": "delete",
     "scam_domains": [],
     "blocked_bot_ids": [],
     "auto_ban_suspicious_bots": True,
@@ -156,6 +160,7 @@ CONFIGURABLE_INT_KEYS = [
 ]
 SUSPICION_WEIGHTS = {
     "badword": 10,
+    "ai_toxic": 20,
     "zalgo": 15,
     "mass_mention": 30,
     "invite_spam": 15,
@@ -472,6 +477,51 @@ def contains_badword(content: str, badwords: list[str]) -> str | None:
             if norm_word in squashed:
                 return w
     return None
+_GROQ_MODEL = "llama-guard-3-8b"
+_UNSAFE_CATEGORY_LABELS = {
+    "S1": "Bạo lực", "S2": "Khủng bố", "S3": "Tình dục", "S4": "Tình dục trẻ em",
+    "S5": "Vũ khí", "S6": "Vi phạm bản quyền", "S7": "Tự sát/tự hại", "S8": "Ghét/phân biệt đối xử",
+    "S9": "Nội dung độc hại khác", "S10": "Quấy rối", "S11": "Thông tin sai lệch", "S12": "Nội dung khiêu dâm",
+    "S13": "An toàn bầu cử", "S14": "Lạm dụng qua code",
+}
+async def check_toxic_groq(content: str) -> tuple[bool, str] | None:
+    """Gọi Groq (Llama Guard) để phân loại nội dung độc hại. Trả về None nếu lỗi/timeout (fail-open)."""
+    if not GROQ_API_KEY or not content or not content.strip():
+        return None
+    try:
+        import aiohttp
+        payload = {
+            "model": _GROQ_MODEL,
+            "messages": [{"role": "user", "content": content[:2000]}],
+            "temperature": 0,
+            "max_tokens": 30,
+        }
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=6),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("Groq moderation trả về status %s", resp.status)
+                    return None
+                data = await resp.json()
+        text = data["choices"][0]["message"]["content"].strip()
+        if text.lower().startswith("unsafe"):
+            cat_codes = re.findall(r"S\d+", text)
+            labels = [_UNSAFE_CATEGORY_LABELS.get(c, c) for c in cat_codes] or ["Không rõ danh mục"]
+            return True, ", ".join(labels)
+        return False, ""
+    except asyncio.TimeoutError:
+        logger.warning("Groq moderation timeout")
+        return None
+    except (KeyError, IndexError, ValueError, TypeError):
+        logger.exception("Groq moderation: phản hồi không đúng định dạng")
+        return None
+    except Exception:
+        logger.exception("Groq moderation: lỗi không xác định")
+        return None
 _DEDUPE_NOISE_RE = re.compile(
     r"[^\w\s]|[\U0001F000-\U0001FFFF\u2600-\u27BF]", re.UNICODE
 )
@@ -633,21 +683,36 @@ async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
         logger.warning("Webhook URL không hợp lệ")
         return None
 _WARNING_COLORS = {discord.Color.gold(), discord.Color.dark_orange()}
+_RED_CARD_LINES = [
+    "VÀOOOOOOOO...ngoài đời thì không, nhưng thẻ đỏ thì CÓ! 🟥 Trọng tài chỉ thẳng đường hầm.",
+    "Còi dài vang lên! 📯 Trọng tài rút thẻ đỏ, cầu thủ bị mời rời sân NGAY LẬP TỨC.",
+    "Pha vào bóng quá thô bạo! Thẻ đỏ trực tiếp, không cần VAR xem lại. 🟥",
+    "VAR xác nhận: LỖI RÕ RÀNG. Trọng tài rút thẻ đỏ, đuổi khỏi sân! 🟥⚽",
+]
+_YELLOW_CARD_LINES = [
+    "Tít! 🟨 Trọng tài rút thẻ vàng, ghi tên vào sổ theo dõi.",
+    "Cảnh cáo! Trọng tài giơ cao thẻ vàng trước mặt cầu thủ. 🟨",
+    "Phạm lỗi chiến thuật — thẻ vàng cho vào sổ, tái phạm là thẻ đỏ. 🟨",
+]
 def _build_log_embed(guild: discord.Guild, text: str, color, critical: bool) -> discord.Embed:
     if critical:
-        title = "🟥 THẺ ĐỎ — VI PHẠM NGHIÊM TRỌNG"
+        title = "🟥⚽ THẺ ĐỎ — TRUẤT QUYỀN THI ĐẤU"
         embed_color = discord.Color.red()
-        footer = "🚨 Trọng tài: Security Bot đã truất quyền thi đấu"
+        commentary = random.choice(_RED_CARD_LINES)
+        footer = "🎙️ Bình luận viên: Security Bot • Trọng tài chính"
     elif color in _WARNING_COLORS:
-        title = "🟨 THẺ VÀNG — CẢNH BÁO"
+        title = "🟨⚽ THẺ VÀNG — CẢNH BÁO"
         embed_color = discord.Color.gold()
-        footer = "⚠️ Trọng tài: Security Bot đang theo dõi"
+        commentary = random.choice(_YELLOW_CARD_LINES)
+        footer = "🎙️ Bình luận viên: Security Bot • Trợ lý trọng tài"
     else:
-        title = "📋 NHẬT KÝ BẢO MẬT"
+        title = "📋⚽ NHẬT KÝ TRẬN ĐẤU"
         embed_color = color
-        footer = "🛡️ Security Bot"
+        commentary = "Diễn biến trận đấu vẫn đang được cập nhật..."
+        footer = "🛡️ Security Bot • Ban tổ chức"
     embed = discord.Embed(title=title, color=embed_color, timestamp=discord.utils.utcnow())
-    embed.add_field(name="Chi tiết", value=text[:1024] or "—", inline=False)
+    embed.add_field(name="🎙️ Bình luận", value=commentary, inline=False)
+    embed.add_field(name="📋 Chi tiết pha bóng", value=text[:1024] or "—", inline=False)
     embed.set_footer(text=f"{footer} • {guild.name}")
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
@@ -1611,6 +1676,21 @@ async def on_message(message: discord.Message):
                 await apply_suspicion_consequence(message.guild, member, score, s)
                 await dm_warning(member, "chứa từ ngữ bị cấm trong server.")
                 return
+        if s.get("ai_moderation_enabled") and GROQ_API_KEY:
+            ai_result = await check_toxic_groq(check_content)
+            if ai_result and ai_result[0]:
+                categories = ai_result[1]
+                action = s.get("ai_moderation_action", "delete")
+                await safe_action(message.delete(), action_name="delete AI-flagged toxic message", guild_id=guild_id)
+                score = add_suspicion(guild_id, member.id, "ai_toxic", s["suspicion_decay_seconds"])
+                bump_stat(guild_id, "ai_toxic_blocked", 1)
+                if action == "timeout":
+                    until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
+                    await safe_action(member.timeout(until, reason=f"AI moderation: {categories}"), action_name="timeout AI-flagged member", guild_id=guild_id)
+                await log(message.guild, f"🤖⚠️ AI (Groq) phát hiện nội dung độc hại ({categories}) từ {member.mention}", discord.Color.gold())
+                await apply_suspicion_consequence(message.guild, member, score, s)
+                await dm_warning(member, f"nội dung bị AI đánh giá là độc hại ({categories}).")
+                return
         if is_zalgo(clean_content, s["zalgo_max_combining_chars"]):
             await safe_action(message.delete(), action_name="delete zalgo message", guild_id=guild_id)
             await log(message.guild, f"👾 Xóa tin nhắn chứa ký tự zalgo bất thường từ {member.mention}", discord.Color.gold())
@@ -1862,6 +1942,25 @@ async def togglealertowner(interaction: discord.Interaction):
     new_val = not s.get("alert_owner_on_critical", True)
     await set_and_save(interaction.guild.id, "alert_owner_on_critical", new_val)
     await interaction.response.send_message(f"✅ Alert owner khi nghiêm trọng: {'Bật' if new_val else 'Tắt'}", ephemeral=True)
+@bot.tree.command(name="toggleaimod", description="Bật/tắt kiểm duyệt toxic bằng AI (Groq/Llama Guard)")
+@admin_only()
+async def toggleaimod(interaction: discord.Interaction):
+    if not GROQ_API_KEY:
+        await interaction.response.send_message("❌ Chưa cấu hình biến môi trường `GROQ_API_KEY` trên server chạy bot — không thể bật tính năng này.", ephemeral=True)
+        return
+    s = cfg(interaction.guild.id)
+    new_val = not s.get("ai_moderation_enabled", False)
+    await set_and_save(interaction.guild.id, "ai_moderation_enabled", new_val)
+    await interaction.response.send_message(f"✅ Kiểm duyệt AI (Groq): {'Bật 🤖' if new_val else 'Tắt'}", ephemeral=True)
+@bot.tree.command(name="setaimodaction", description="Chọn hành động khi AI phát hiện tin nhắn độc hại: xóa hoặc xóa+timeout")
+@admin_only()
+@app_commands.choices(action=[
+    app_commands.Choice(name="Chỉ xóa tin nhắn", value="delete"),
+    app_commands.Choice(name="Xóa + timeout 10 phút", value="timeout"),
+])
+async def setaimodaction(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    await set_and_save(interaction.guild.id, "ai_moderation_action", action.value)
+    await interaction.response.send_message(f"✅ Hành động AI moderation: {action.name}", ephemeral=True)
 @bot.tree.command(name="lockdown", description="Bật/tắt lockdown thủ công (chặn account mới nhắn tin/join)")
 @admin_only()
 async def lockdown(interaction: discord.Interaction, active: bool):
@@ -2368,6 +2467,17 @@ class SecurityPanelView(discord.ui.View):
         new_val = not s.get("lockdown_active", False)
         await set_and_save(interaction.guild.id, "lockdown_active", new_val)
         await interaction.response.send_message(f"{'🔒 Lockdown đã BẬT' if new_val else '🔓 Lockdown đã TẮT'}", ephemeral=True)
+    @discord.ui.button(label="AI Toxic ON/OFF", style=discord.ButtonStyle.success, emoji="🤖", custom_id="secpanel:aimod")
+    async def toggle_ai_mod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        if not GROQ_API_KEY:
+            await interaction.response.send_message("❌ Chưa cấu hình `GROQ_API_KEY` trên server chạy bot.", ephemeral=True)
+            return
+        s = cfg(interaction.guild.id)
+        new_val = not s.get("ai_moderation_enabled", False)
+        await set_and_save(interaction.guild.id, "ai_moderation_enabled", new_val)
+        await interaction.response.send_message(f"{'🤖 AI moderation đã BẬT' if new_val else '🤖 AI moderation đã TẮT'}", ephemeral=True)
     @discord.ui.button(label="Backup ngay", style=discord.ButtonStyle.primary, emoji="📂", custom_id="secpanel:backup")
     async def backup_now(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._require_admin(interaction):
@@ -2384,6 +2494,7 @@ class SecurityPanelView(discord.ui.View):
         embed.add_field(name="Lockdown", value="🔒 BẬT" if s.get("lockdown_active") else "🔓 Tắt", inline=True)
         embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
         embed.add_field(name="Blocked bots", value=str(len(s["blocked_bot_ids"])), inline=True)
+        embed.add_field(name="AI Toxic Mod", value="🤖 Bật" if s.get("ai_moderation_enabled") else "Tắt", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     @discord.ui.button(label="Quét bot lạ", style=discord.ButtonStyle.secondary, emoji="🤖", custom_id="secpanel:scanbots")
     async def scan_bots_btn(self, interaction: discord.Interaction, button: discord.ui.Button):

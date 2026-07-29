@@ -24,7 +24,7 @@ OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().
 PREFIX = os.getenv("PREFIX", "!")
 
 # ── Firestore setup ──────────────────────────────────────────────────────
-# Yêu cầu biến môi trường GOOGLE_APPLICATION_CREDENTIALS_JSON (nội dung JSON
+# Yêu cầu biến môi trường aGOOGLE_APPLICATION_CREDENTIALS_JSON (nội dung JSON
 # của service account key) HOẶC GOOGLE_APPLICATION_CREDENTIALS (đường dẫn file).
 # Collection layout:
 #   settings/{guild_id}      -> toàn bộ config của guild
@@ -499,22 +499,44 @@ def contains_badword(content: str, badwords: list[str]) -> str | None:
             if norm_word in squashed:
                 return w
     return None
-_GROQ_MODEL = "llama-guard-3-8b"
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 _UNSAFE_CATEGORY_LABELS = {
     "S1": "Bạo lực", "S2": "Khủng bố", "S3": "Tình dục", "S4": "Tình dục trẻ em",
     "S5": "Vũ khí", "S6": "Vi phạm bản quyền", "S7": "Tự sát/tự hại", "S8": "Ghét/phân biệt đối xử",
     "S9": "Nội dung độc hại khác", "S10": "Quấy rối", "S11": "Thông tin sai lệch", "S12": "Nội dung khiêu dâm",
     "S13": "An toàn bầu cử", "S14": "Lạm dụng qua code",
+    "S15": "Chửi thề/Xúc phạm/Toxic", "S16": "Từ ngữ phân biệt chủng tộc/kỳ thị (né tránh bộ lọc)",
 }
-# Điểm nghiêm trọng theo từng danh mục — nhóm nặng (trẻ em, bạo lực, tự hại, vũ khí) cho điểm cao hẳn
-# để bị xử lý (thẻ đỏ) ngay từ lần đầu, thay vì phải tích lũy nhiều lần như vi phạm nhẹ.
+# Điểm nghiêm trọng theo từng danh mục — nhóm nặng (trẻ em, bạo lực, tự hại, vũ khí, kỳ thị chủng tộc)
+# cho điểm cao hẳn để bị xử lý (thẻ đỏ) ngay từ lần đầu, thay vì phải tích lũy nhiều lần như vi phạm nhẹ.
 _CATEGORY_SEVERITY = {
-    "S4": 100, "S1": 60, "S7": 60, "S5": 60, "S2": 60,
-    "S8": 35, "S10": 30, "S3": 30, "S12": 30,
+    "S4": 100, "S1": 60, "S7": 60, "S5": 60, "S2": 60, "S16": 60,
+    "S8": 35, "S10": 30, "S3": 30, "S12": 30, "S15": 25,
     "S9": 20, "S11": 15, "S6": 15, "S13": 15, "S14": 20,
 }
+_GROQ_MOD_SYSTEM_PROMPT = """Bạn là bộ lọc kiểm duyệt nội dung cho một server Discord tiếng Việt (có cả thành viên nói tiếng Anh).
+Nhiệm vụ: đọc đoạn tin nhắn của người dùng và phân loại nó có VI PHẠM hay không, dựa trên danh sách nhóm sau:
+S1 Bạo lực | S2 Khủng bố | S3 Tình dục | S4 Tình dục trẻ em | S5 Vũ khí | S6 Vi phạm bản quyền
+S7 Tự sát/tự hại | S8 Ghét/phân biệt đối xử | S9 Độc hại khác | S10 Quấy rối | S11 Thông tin sai lệch
+S12 Khiêu dâm | S13 An toàn bầu cử | S14 Lạm dụng qua code | S15 Chửi thề/Xúc phạm/Toxic
+S16 Từ ngữ phân biệt chủng tộc/kỳ thị (kể cả khi bị viết né tránh bộ lọc)
+
+QUAN TRỌNG — người dùng (đặc biệt gen Z) thường cố tình viết sai chính tả, chèn ký tự, hoặc đánh vần để né bộ lọc từ khoá.
+Bạn PHẢI nhận diện các kiểu né tránh sau và vẫn đánh giá theo NGHĨA THẬT của từ, không chỉ theo mặt chữ:
+- Viết cách chữ ra từng ký tự hoặc nối bằng khoảng trắng/dấu chấm/gạch: "n i g g" hoặc "n.i.g.g.a" hoặc "đ m mày" hoặc "đ.i.t"
+- Chèn số/ký tự lạ thay chữ cái (leetspeak): "n1663r", "b1tch", "vcl" kiểu 1337, chèn emoji/số giữa các chữ cái
+- Viết tắt bằng chữ cái đầu: "stfu" = shut the fuck up, "tf" = the fuck, "wtf" = what the fuck, "stg" = swear to god (đe doạ/tục), "kys" = kill yourself (rất nặng, xếp S7)
+- Teencode/viết tắt tiếng Việt: "vcl", "dmm", "clgt", "vl", "cc", "vlon" và các biến thể gõ không dấu, viết hoa xen kẽ, thêm dấu chấm/gạch giữa các chữ cái
+- Từ kỳ thị chủng tộc tiếng Anh (n-word và biến thể) dù viết dưới dạng nào cũng xếp S16, mức nghiêm trọng cao
+- Chửi thề/xúc phạm thông thường (đồ ngu, súc vật, óc chó, thằng chó, fuck you, asshole, bitch, v.v., kể cả biến thể né tránh) xếp S15
+
+Chỉ trả lời đúng 1 trong 2 định dạng, KHÔNG giải thích gì thêm:
+safe
+hoặc
+unsafe
+S15,S16 (liệt kê các mã nhóm vi phạm, cách nhau bởi dấu phẩy, không có khoảng trắng)"""
 async def check_toxic_groq(content: str) -> tuple[bool, str, int] | None:
-    """Gọi Groq (Llama Guard) để phân loại nội dung độc hại.
+    """Gọi Groq (LLM tổng quát, prompt tự viết) để phân loại nội dung độc hại/né bộ lọc.
     Trả về (is_unsafe, nhãn danh mục tiếng Việt, điểm nghiêm trọng) hoặc None nếu lỗi/timeout (fail-open)."""
     if not GROQ_API_KEY or not content or not content.strip():
         return None
@@ -522,7 +544,10 @@ async def check_toxic_groq(content: str) -> tuple[bool, str, int] | None:
         import aiohttp
         payload = {
             "model": _GROQ_MODEL,
-            "messages": [{"role": "user", "content": content[:2000]}],
+            "messages": [
+                {"role": "system", "content": _GROQ_MOD_SYSTEM_PROMPT},
+                {"role": "user", "content": content[:2000]},
+            ],
             "temperature": 0,
             "max_tokens": 30,
         }

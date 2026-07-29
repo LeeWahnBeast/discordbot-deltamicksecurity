@@ -105,8 +105,8 @@ DEFAULTS = {
     "join_pattern_name_similarity_ratio": 0.6,
     "mass_role_grant_threshold": 5,
     "mass_role_grant_window": 15,
-    "mass_ban_threshold": 5,
-    "mass_ban_window": 10,
+    "mass_ban_threshold": 3,
+    "mass_ban_window": 6,
     "mass_kick_threshold": 5,
     "mass_kick_window": 10,
     "perm_wipe_threshold": 5,
@@ -632,11 +632,29 @@ async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
     except (ValueError, discord.HTTPException):
         logger.warning("Webhook URL không hợp lệ")
         return None
+_WARNING_COLORS = {discord.Color.gold(), discord.Color.dark_orange()}
+def _build_log_embed(guild: discord.Guild, text: str, color, critical: bool) -> discord.Embed:
+    if critical:
+        title = "🟥 THẺ ĐỎ — VI PHẠM NGHIÊM TRỌNG"
+        embed_color = discord.Color.red()
+        footer = "🚨 Trọng tài: Security Bot đã truất quyền thi đấu"
+    elif color in _WARNING_COLORS:
+        title = "🟨 THẺ VÀNG — CẢNH BÁO"
+        embed_color = discord.Color.gold()
+        footer = "⚠️ Trọng tài: Security Bot đang theo dõi"
+    else:
+        title = "📋 NHẬT KÝ BẢO MẬT"
+        embed_color = color
+        footer = "🛡️ Security Bot"
+    embed = discord.Embed(title=title, color=embed_color, timestamp=discord.utils.utcnow())
+    embed.add_field(name="Chi tiết", value=text[:1024] or "—", inline=False)
+    embed.set_footer(text=f"{footer} • {guild.name}")
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    return embed
 async def log(guild: discord.Guild, text: str, color=discord.Color.blurple(), *, critical: bool = False):
     s = cfg(guild.id)
-    embed = discord.Embed(description=text, color=color, timestamp=discord.utils.utcnow())
-    if critical:
-        embed.set_footer(text="⚠️ SỰ CỐ NGHIÊM TRỌNG")
+    embed = _build_log_embed(guild, text, color, critical)
     sent = False
     if s.get("log_webhook_url"):
         wh = await get_log_webhook(s["log_webhook_url"])
@@ -1233,15 +1251,33 @@ async def on_audit_log_entry(entry: discord.AuditLogEntry):
         if target_id in set(s.get("protected_role_ids", [])):
             await log(guild, f"⚠️ Phát hiện thay đổi role được bảo vệ (`{target_id}`) bởi {actor.mention} — kiểm tra ngay!", discord.Color.dark_red(), critical=True)
     if entry.action == discord.AuditLogAction.ban:
+        victim = getattr(entry, "target", None)
+        victim_id = getattr(victim, "id", None)
         bucket = recent_bans[guild.id]
-        bucket.append((now, actor.id))
+        bucket.append((now, actor.id, victim_id))
         while bucket and now - bucket[0][0] > s["mass_ban_window"]:
             bucket.popleft()
-        actor_bans = sum(1 for _, aid in bucket if aid == actor.id)
+        actor_ban_events = [b for b in bucket if b[1] == actor.id]
+        actor_bans = len(actor_ban_events)
         if actor_bans >= s["mass_ban_threshold"]:
+            victim_ids = [b[2] for b in actor_ban_events if b[2] is not None]
             bucket.clear()
             _prune_empty(recent_bans, guild.id)
-            await handle_mod_abuse(guild, actor, member, "mass_ban", f"{actor_bans} lượt ban trong {s['mass_ban_window']}s")
+            unbanned = 0
+            for vid in victim_ids:
+                try:
+                    await guild.unban(discord.Object(id=vid), reason="Anti-nuke: khôi phục sau mass-ban")
+                    unbanned += 1
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    logger.warning("Thiếu quyền unban nạn nhân mass-ban (guild=%s)", guild.id)
+                except discord.HTTPException:
+                    logger.exception("Lỗi HTTP khi auto-unban nạn nhân mass-ban (guild=%s)", guild.id)
+            await handle_mod_abuse(
+                guild, actor, member, "mass_ban",
+                f"{actor_bans} lượt ban trong {s['mass_ban_window']}s — đã tự động unban {unbanned}/{len(victim_ids)} nạn nhân"
+            )
             return
     if entry.action == discord.AuditLogAction.kick:
         bucket = recent_kicks[guild.id]
@@ -2316,6 +2352,62 @@ async def status(interaction: discord.Interaction):
     last_backup = backups.get(str(interaction.guild.id), {}).get("timestamp")
     embed.add_field(name="Backup gần nhất", value=(discord.utils.format_dt(datetime.datetime.fromtimestamp(last_backup, tz=datetime.timezone.utc), style="R") if last_backup else "chưa có"), inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+class SecurityPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    async def _require_admin(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Chỉ admin mới dùng được panel này.", ephemeral=True)
+            return False
+        return True
+    @discord.ui.button(label="Lockdown ON/OFF", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="secpanel:lockdown")
+    async def toggle_lockdown(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        s = cfg(interaction.guild.id)
+        new_val = not s.get("lockdown_active", False)
+        await set_and_save(interaction.guild.id, "lockdown_active", new_val)
+        await interaction.response.send_message(f"{'🔒 Lockdown đã BẬT' if new_val else '🔓 Lockdown đã TẮT'}", ephemeral=True)
+    @discord.ui.button(label="Backup ngay", style=discord.ButtonStyle.primary, emoji="📂", custom_id="secpanel:backup")
+    async def backup_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        await snapshot_guild(interaction.guild)
+        await interaction.followup.send("✅ Đã chụp snapshot backup mới.", ephemeral=True)
+    @discord.ui.button(label="Trạng thái", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="secpanel:status")
+    async def show_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        s = cfg(interaction.guild.id)
+        embed = discord.Embed(title="📊 Trạng thái nhanh", color=discord.Color.blurple())
+        embed.add_field(name="Lockdown", value="🔒 BẬT" if s.get("lockdown_active") else "🔓 Tắt", inline=True)
+        embed.add_field(name="Badwords", value=str(len(s["badwords"])), inline=True)
+        embed.add_field(name="Blocked bots", value=str(len(s["blocked_bot_ids"])), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    @discord.ui.button(label="Quét bot lạ", style=discord.ButtonStyle.secondary, emoji="🤖", custom_id="secpanel:scanbots")
+    async def scan_bots_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        s = cfg(interaction.guild.id)
+        banned = 0
+        for m in interaction.guild.members:
+            if not m.bot or is_whitelisted_bot(interaction.guild.id, m.id):
+                continue
+            if m.id in set(s.get("blocked_bot_ids", [])) or (m.name is None or m.name.strip() == "" or m.name.lower() == "none"):
+                await safe_action(m.ban(reason="Anti-nuke: quét bot lạ qua panel"), action_name="ban bot via panel", guild_id=interaction.guild.id)
+                banned += 1
+        await interaction.followup.send(f"✅ Đã quét xong — ban {banned} bot khả nghi.", ephemeral=True)
+@bot.tree.command(name="panel", description="Mở bảng điều khiển bảo mật nhanh (nút bấm thay vì gõ lệnh)")
+@admin_only()
+async def panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛡️ Bảng điều khiển bảo mật",
+        description="Bấm nút bên dưới thay vì gõ lệnh — chỉ admin mới thao tác được.",
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, view=SecurityPanelView())
 @bot.event
 async def setup_hook():
     try:
@@ -2328,6 +2420,7 @@ async def setup_hook():
     bot.loop.create_task(cleanup_loop())
     bot.loop.create_task(stats_save_loop())
     bot.loop.create_task(duplicate_channel_scan_loop())
+    bot.add_view(SecurityPanelView())
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Thiếu DISCORD_TOKEN trong biến môi trường.")

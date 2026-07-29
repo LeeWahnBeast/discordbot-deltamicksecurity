@@ -24,7 +24,7 @@ OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().
 PREFIX = os.getenv("PREFIX", "!")
 
 # ── Firestore setup ──────────────────────────────────────────────────────
-# Yêu cầu biến môi trường aGOOGLE_APPLICATION_CREDENTIALS_JSON (nội dung JSON
+# Yêu cầu biến môi trường GOOGLE_APPLICATION_CREDENTIALS_JSON (nội dung JSON
 # của service account key) HOẶC GOOGLE_APPLICATION_CREDENTIALS (đường dẫn file).
 # Collection layout:
 #   settings/{guild_id}      -> toàn bộ config của guild
@@ -46,6 +46,7 @@ SETTINGS_COLLECTION = "settings"
 BACKUP_COLLECTION = "backups"
 STATS_COLLECTION = "stats"
 JAILS_COLLECTION = "jails"
+FRIENDLY_COLLECTION = "friendly"
 DEFAULTS = {
     "log_channel_id": None,
     "log_webhook_url": None,
@@ -214,11 +215,12 @@ REDIRECT_DOMAINS = {
 settings: dict = {}
 backups: dict = {}
 stats: dict = {}
-jails: dict = {}  # {guild_id_str: {user_id_str: {"removed_role_ids": [...], "release_at": epoch_seconds}}}
+jails: dict = {}  # {guild_id_str: {user_id_str: {"removed_role_ids": [...], "release_at": epoch_seconds, "jailed_at": epoch, "case_id": str, "reason": str, "appeal_status": "none"|"pending"|"approved"|"rejected", "appeal_text": str, "appeal_at": epoch, "verdict_at": epoch, "verdict_by": int}}}
+friendly: dict = {}  # {guild_id_str: {user_id_str: {"score": int, "updated_at": epoch_seconds}}}
 _dirty_stats_guilds: set[str] = set()
 
 def _load_all_sync():
-    global settings, backups, stats, jails
+    global settings, backups, stats, jails, friendly
     settings = {}
     for doc in db.collection(SETTINGS_COLLECTION).stream():
         settings[doc.id] = doc.to_dict() or {}
@@ -234,6 +236,9 @@ def _load_all_sync():
     jails = {}
     for doc in db.collection(JAILS_COLLECTION).stream():
         jails[doc.id] = doc.to_dict() or {}
+    friendly = {}
+    for doc in db.collection(FRIENDLY_COLLECTION).stream():
+        friendly[doc.id] = doc.to_dict() or {}
 
 def cfg(guild_id: int) -> dict:
     g = settings.setdefault(str(guild_id), {})
@@ -282,6 +287,22 @@ async def save_guild_jail(guild_id: int):
         await asyncio.to_thread(_save_guild_jail_sync, str(guild_id), jails.get(str(guild_id), {}))
     except Exception:
         logger.exception("Không thể lưu jail record lên Firestore cho guild %s", guild_id)
+def _save_guild_friendly_sync(guild_id: str, data: dict):
+    db.collection(FRIENDLY_COLLECTION).document(guild_id).set(data)
+async def save_guild_friendly(guild_id: int):
+    try:
+        await asyncio.to_thread(_save_guild_friendly_sync, str(guild_id), friendly.get(str(guild_id), {}))
+    except Exception:
+        logger.exception("Không thể lưu điểm Thân thiện lên Firestore cho guild %s", guild_id)
+def add_friendly_point(guild_id: int, user_id: int, points: int = 1) -> int:
+    gid_key, uid_key = str(guild_id), str(user_id)
+    bucket = friendly.setdefault(gid_key, {})
+    entry = bucket.setdefault(uid_key, {"score": 0, "updated_at": time.time()})
+    entry["score"] = entry.get("score", 0) + points
+    entry["updated_at"] = time.time()
+    return entry["score"]
+def get_friendly_score(guild_id: int, user_id: int) -> int:
+    return friendly.get(str(guild_id), {}).get(str(user_id), {}).get("score", 0)
 def _save_guild_backup_sync(guild_id: str, data: dict):
     db.collection(BACKUP_COLLECTION).document(guild_id).set(data)
 async def save_guild_backup(guild_id: int):
@@ -525,19 +546,41 @@ QUAN TRỌNG — người dùng (đặc biệt gen Z) thường cố tình viế
 Bạn PHẢI nhận diện các kiểu né tránh sau và vẫn đánh giá theo NGHĨA THẬT của từ, không chỉ theo mặt chữ:
 - Viết cách chữ ra từng ký tự hoặc nối bằng khoảng trắng/dấu chấm/gạch: "n i g g" hoặc "n.i.g.g.a" hoặc "đ m mày" hoặc "đ.i.t"
 - Chèn số/ký tự lạ thay chữ cái (leetspeak): "n1663r", "b1tch", "vcl" kiểu 1337, chèn emoji/số giữa các chữ cái
-- Viết tắt bằng chữ cái đầu: "stfu" = shut the fuck up, "tf" = the fuck, "wtf" = what the fuck, "stg" = swear to god (đe doạ/tục), "kys" = kill yourself (rất nặng, xếp S7)
-- Teencode/viết tắt tiếng Việt: "vcl", "dmm", "clgt", "vl", "cc", "vlon" và các biến thể gõ không dấu, viết hoa xen kẽ, thêm dấu chấm/gạch giữa các chữ cái
+- Viết tắt bằng chữ cái đầu MANG NGHĨA TỤC/ĐE DOẠ trong ngữ cảnh: "stfu" = shut the fuck up, "wtf" = what the fuck,
+  "kys" = kill yourself (rất nặng, xếp S7)
+- Teencode/viết tắt tiếng Việt: "vcl", "dmm", "clgt", "vlon" và các biến thể gõ không dấu, viết hoa xen kẽ, thêm dấu chấm/gạch giữa các chữ cái
 - Từ kỳ thị chủng tộc tiếng Anh (n-word và biến thể) dù viết dưới dạng nào cũng xếp S16, mức nghiêm trọng cao
 - Chửi thề/xúc phạm thông thường (đồ ngu, súc vật, óc chó, thằng chó, fuck you, asshole, bitch, v.v., kể cả biến thể né tránh) xếp S15
 
-Chỉ trả lời đúng 1 trong 2 định dạng, KHÔNG giải thích gì thêm:
+CỰC KỲ QUAN TRỌNG — TRÁNH BÁO ĐỘNG GIẢ (false positive). Server này là chat đời thường/chơi game, đa số tin nhắn AN TOÀN:
+- Chỉ xếp unsafe khi có Ý XÚC PHẠM/ĐE DOẠ/THÙ ĐỊCH THẬT SỰ, rõ ràng, nhắm vào một người/nhóm cụ thể — không suy diễn quá đà.
+- KHÔNG unsafe chỉ vì một từ TÌNH CỜ chứa chuỗi ký tự giống từ cấm (vd: "cliff", "class", "assign", "grape", "scunthorpe"
+  chứa "ass"/"rape" nhưng vô hại) — phải xét NGHĨA CẢ CÂU, không chỉ khớp chuỗi con.
+- KHÔNG unsafe với ngôn ngữ game bình thường: "kill", "chết", "bắn", "địch", "tiêu diệt", "combat", "gank", "1v1" trong
+  ngữ cảnh chơi game/thể thao điện tử — đây là S1 GIẢ, luôn safe.
+- KHÔNG unsafe với lời trêu đùa nhẹ nhàng, thân mật giữa bạn bè không mang ác ý (vd: "mày ngốc quá =))", "thằng điên"
+  kiểu đùa vui có emoji/cười kèm theo) — chỉ xếp S15 khi rõ ràng là công kích/miệt thị thật.
+- KHÔNG unsafe chỉ vì tin nhắn ngắn, viết tắt, không dấu, hoặc lạ — chỉ đánh dấu khi chắc chắn có từ/cụm từ vi phạm thật.
+- Nếu KHÔNG CHẮC CHẮN hoặc bằng chứng mơ hồ, LUÔN LUÔN trả lời safe. Thà bỏ sót còn hơn xử oan người vô tội.
+
+Ví dụ SAFE (không được xếp unsafe): "gg tối nay đi ăn không", "thằng này chơi hay vãi", "cliff của map này đẹp",
+"t muốn kill con boss này quá", "haha mày ngu ghê =))", "stg tao thi được điểm cao luôn" (swear to god = thề, không tục ở đây).
+Ví dụ UNSAFE thật sự: "đm mày óc chó", "n1663r", "kys đi", "địt mẹ mày", "stfu thằng ngu".
+
+Ngoài ra, nếu nội dung AN TOÀN, hãy đánh giá thêm nó có phải lời nhắn THÂN THIỆN/tử tế/đẹp không
+(khen ngợi, động viên, cảm ơn, chào hỏi lịch sự, giúp đỡ người khác, lan toả năng lượng tích cực).
+
+Chỉ trả lời đúng 1 trong 3 định dạng, KHÔNG giải thích gì thêm:
 safe
+hoặc
+safe:friendly
 hoặc
 unsafe
 S15,S16 (liệt kê các mã nhóm vi phạm, cách nhau bởi dấu phẩy, không có khoảng trắng)"""
-async def check_toxic_groq(content: str) -> tuple[bool, str, int] | None:
-    """Gọi Groq (LLM tổng quát, prompt tự viết) để phân loại nội dung độc hại/né bộ lọc.
-    Trả về (is_unsafe, nhãn danh mục tiếng Việt, điểm nghiêm trọng) hoặc None nếu lỗi/timeout (fail-open)."""
+async def check_toxic_groq(content: str) -> tuple[bool, str, int, bool] | None:
+    """Gọi Groq (LLM tổng quát, prompt tự viết) để phân loại nội dung độc hại/né bộ lọc, và
+    tiện thể nhận diện tin nhắn thân thiện/tử tế để cộng điểm Thân thiện.
+    Trả về (is_unsafe, nhãn danh mục tiếng Việt, điểm nghiêm trọng, is_friendly) hoặc None nếu lỗi/timeout (fail-open)."""
     if not GROQ_API_KEY or not content or not content.strip():
         return None
     try:
@@ -567,8 +610,9 @@ async def check_toxic_groq(content: str) -> tuple[bool, str, int] | None:
             cat_codes = re.findall(r"S\d+", text)
             labels = [_UNSAFE_CATEGORY_LABELS.get(c, c) for c in cat_codes] or ["Không rõ danh mục"]
             severity = max((_CATEGORY_SEVERITY.get(c, 25) for c in cat_codes), default=25)
-            return True, ", ".join(labels), severity
-        return False, "", 0
+            return True, ", ".join(labels), severity, False
+        is_friendly = "friendly" in text.lower()
+        return False, "", 0, is_friendly
     except asyncio.TimeoutError:
         logger.warning("Groq moderation timeout")
         return None
@@ -708,7 +752,7 @@ def cleanup_suspicion_scores(max_age_seconds: int = 3600):
         _warned_users.discard(k)
         card_tally.pop(k, None)
 async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, reason_text: str):
-    """Tước tạm toàn bộ role hiện có, gán role tù nhân, và hẹn giờ trả lại sau N giờ."""
+    """Tước tạm toàn bộ role hiện có, gán role tù nhân, và hẹn giờ trả lại sau N giờ (bản án có thể được giảm nếu điểm Thân thiện cao)."""
     jail_role_id = s.get("jail_role_id")
     jail_role = guild.get_role(jail_role_id) if jail_role_id else None
     if jail_role is None:
@@ -719,18 +763,40 @@ async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, rea
     if removable:
         await safe_action(member.remove_roles(*removable, reason=f"Jail: {reason_text}"), action_name="strip roles for jail", guild_id=guild.id)
     await safe_action(member.add_roles(jail_role, reason=f"Jail: {reason_text}"), action_name="add jail role", guild_id=guild.id)
-    hours = s.get("jail_duration_hours", 24)
-    release_at = time.time() + hours * 3600
+    base_hours = s.get("jail_duration_hours", 24)
+    friendly_score = get_friendly_score(guild.id, member.id)
+    # Cứ 20 điểm Thân thiện được giảm 1 giờ án, tối đa giảm nửa mức án (án tù không thể về 0 giờ).
+    reduction = min(friendly_score // 20, base_hours // 2)
+    hours = max(1, base_hours - reduction)
+    now = time.time()
+    release_at = now + hours * 3600
     gid_key = str(guild.id)
-    jails.setdefault(gid_key, {})[str(member.id)] = {"removed_role_ids": removed_ids, "release_at": release_at}
+    case_id = f"{guild.id}-{member.id}-{int(now)}"
+    jails.setdefault(gid_key, {})[str(member.id)] = {
+        "removed_role_ids": removed_ids, "release_at": release_at,
+        "jailed_at": now, "case_id": case_id, "reason": reason_text,
+        "base_hours": base_hours, "hours": hours, "friendly_discount_hours": reduction,
+        "appeal_status": "none", "appeal_text": None, "appeal_at": None,
+        "verdict_at": None, "verdict_by": None,
+    }
     await save_guild_jail(guild.id)
     channel_id = s.get("jail_announce_channel_id")
     channel = guild.get_channel(channel_id) if channel_id else None
     if channel:
-        await safe_action(
-            channel.send(f"🔒 {member.mention} đã bị giam **{hours} giờ** vì {reason_text}. Bạn không thể sử dụng `llaudon` vì bạn là tù nhân đặc biệt."),
-            action_name="announce jail", guild_id=guild.id,
+        discount_note = f" (đã giảm {reduction}h nhờ **{friendly_score} điểm Thân thiện**)" if reduction > 0 else ""
+        embed = discord.Embed(
+            title="⚖️ TÒA TUYÊN ÁN",
+            description=(
+                f"Bị cáo: {member.mention}\n"
+                f"Tội danh: {reason_text}\n"
+                f"Mức án: **{hours} giờ** giam giữ{discount_note}\n"
+                f"Mã hồ sơ: `{case_id}`\n\n"
+                f"Bị cáo có quyền nộp đơn kháng cáo bằng lệnh `/khangcao` trong thời gian thụ án."
+            ),
+            color=discord.Color.dark_red(),
         )
+        embed.set_footer(text=f"Ngày tuyên án: {datetime.datetime.fromtimestamp(now, tz=datetime.timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}")
+        await safe_action(channel.send(embed=embed), action_name="announce jail", guild_id=guild.id)
     return True
 async def release_from_jail(guild: discord.Guild, user_id: int, record: dict):
     jail_role_id = cfg(guild.id).get("jail_role_id")
@@ -745,10 +811,14 @@ async def release_from_jail(guild: discord.Guild, user_id: int, record: dict):
         restore_roles = [r for r in restore_roles if r is not None]
         if restore_roles:
             await safe_action(member.add_roles(*restore_roles, reason="Hết hạn giam giữ: trả lại role cũ"), action_name="restore roles after jail", guild_id=guild.id)
-        await log(guild, f"🔓 {member.mention} đã mãn hạn tù, được trả lại role cũ.", discord.Color.green())
+        await log(guild, f"⚖️🔓 {member.mention} đã **mãn hạn tù**, được trả lại role cũ. Hồ sơ án tích đã đóng, điểm vi phạm được **xóa sạch** — làm lại từ đầu.", discord.Color.green())
     gid_key = str(guild.id)
     jails.get(gid_key, {}).pop(str(user_id), None)
     await save_guild_jail(guild.id)
+    key = (guild.id, user_id)
+    suspicion_scores.pop(key, None)
+    card_tally.pop(key, None)
+    _warned_users.discard(key)
 async def jail_release_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -1825,7 +1895,7 @@ async def on_message(message: discord.Message):
         if s.get("ai_moderation_enabled") and GROQ_API_KEY:
             ai_result = await check_toxic_groq(check_content)
             if ai_result and ai_result[0]:
-                _, categories, severity = ai_result
+                _, categories, severity, _ = ai_result
                 action = s.get("ai_moderation_action", "delete")
                 await safe_action(message.delete(), action_name="delete AI-flagged toxic message", guild_id=guild_id)
                 score = add_suspicion(guild_id, member.id, "ai_toxic", s["suspicion_decay_seconds"], points_override=severity)
@@ -1839,6 +1909,9 @@ async def on_message(message: discord.Message):
                 await apply_suspicion_consequence(message.guild, member, score, s)
                 await dm_warning(member, f"nội dung bị AI đánh giá là độc hại ({categories}).")
                 return
+            if ai_result and len(ai_result) > 3 and ai_result[3] and not is_other_bot:
+                add_friendly_point(guild_id, member.id, 1)
+                await save_guild_friendly(guild_id)
         if is_zalgo(clean_content, s["zalgo_max_combining_chars"]):
             await safe_action(message.delete(), action_name="delete zalgo message", guild_id=guild_id)
             await log(message.guild, f"👾 Xóa tin nhắn chứa ký tự zalgo bất thường từ {member.mention}", discord.Color.gold())
@@ -2109,6 +2182,107 @@ async def unjail(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer(ephemeral=True)
     await release_from_jail(interaction.guild, member.id, record)
     await interaction.followup.send(f"✅ Đã thả tù {member.mention} và trả lại role cũ.", ephemeral=True)
+class AppealDecisionView(discord.ui.View):
+    """Nút cho admin duyệt/bác đơn kháng cáo. Chỉ hoạt động khi bot chưa restart kể từ lúc gửi đơn
+    (dùng /xuxykhangcao nếu nút đã hết tác dụng sau khi bot khởi động lại)."""
+    def __init__(self, guild_id: int, user_id: int, case_id: str):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.case_id = case_id
+    async def _resolve(self, interaction: discord.Interaction, approve: bool):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Chỉ admin mới có quyền phán quyết đơn kháng cáo.", ephemeral=True)
+            return
+        gid_key, uid_key = str(self.guild_id), str(self.user_id)
+        record = jails.get(gid_key, {}).get(uid_key)
+        if not record or record.get("case_id") != self.case_id:
+            await interaction.response.send_message("⚠️ Hồ sơ này không còn hiệu lực (có thể đã được xử lý hoặc đã mãn hạn).", ephemeral=True)
+            return
+        if record.get("appeal_status") != "pending":
+            await interaction.response.send_message("⚠️ Đơn kháng cáo này đã được xử lý trước đó.", ephemeral=True)
+            return
+        record["verdict_at"] = time.time()
+        record["verdict_by"] = interaction.user.id
+        record["appeal_status"] = "approved" if approve else "rejected"
+        await save_guild_jail(self.guild_id)
+        for child in self.children:
+            child.disabled = True
+        if approve:
+            await release_from_jail(interaction.guild, self.user_id, record)
+            await interaction.response.edit_message(content=f"✅ **KHÁNG CÁO ĐƯỢC CHẤP THUẬN** bởi {interaction.user.mention} — bị cáo đã được **ân xá** và trả tự do.", embed=None, view=self)
+        else:
+            await log(interaction.guild, f"⚖️❌ Đơn kháng cáo của <@{self.user_id}> bị {interaction.user.mention} **bác bỏ** — tiếp tục thụ án.", discord.Color.dark_red())
+            await interaction.response.edit_message(content=f"❌ **KHÁNG CÁO BỊ BÁC** bởi {interaction.user.mention} — bị cáo tiếp tục thụ án.", embed=None, view=self)
+    @discord.ui.button(label="Chấp thuận kháng cáo", style=discord.ButtonStyle.success, emoji="⚖️")
+    async def approve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._resolve(interaction, approve=True)
+    @discord.ui.button(label="Bác đơn", style=discord.ButtonStyle.danger, emoji="❌")
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._resolve(interaction, approve=False)
+@bot.tree.command(name="khangcao", description="Nộp đơn kháng cáo nếu bạn đang bị giam giữ (tù)")
+async def khangcao(interaction: discord.Interaction, ly_do: str):
+    gid_key = str(interaction.guild.id)
+    record = jails.get(gid_key, {}).get(str(interaction.user.id))
+    if not record:
+        await interaction.response.send_message("❌ Bạn hiện không bị giam giữ nên không thể nộp đơn kháng cáo.", ephemeral=True)
+        return
+    status = record.get("appeal_status", "none")
+    if status == "pending":
+        await interaction.response.send_message("⏳ Đơn kháng cáo của bạn đang chờ tòa xử lý, vui lòng đợi.", ephemeral=True)
+        return
+    if status in ("approved", "rejected"):
+        await interaction.response.send_message("❌ Bạn đã kháng cáo một lần trong hồ sơ án này rồi, không thể nộp thêm.", ephemeral=True)
+        return
+    record["appeal_status"] = "pending"
+    record["appeal_text"] = ly_do
+    record["appeal_at"] = time.time()
+    await save_guild_jail(interaction.guild.id)
+    s = cfg(interaction.guild.id)
+    channel_id = s.get("jail_announce_channel_id")
+    channel = interaction.guild.get_channel(channel_id) if channel_id else None
+    if channel:
+        embed = discord.Embed(
+            title="🧑‍⚖️ ĐƠN KHÁNG CÁO MỚI",
+            description=(
+                f"Bị cáo: {interaction.user.mention}\n"
+                f"Mã hồ sơ: `{record.get('case_id', 'N/A')}`\n"
+                f"Tội danh gốc: {record.get('reason', 'không rõ')}\n\n"
+                f"**Lý do kháng cáo:**\n{ly_do}"
+            ),
+            color=discord.Color.gold(),
+        )
+        view = AppealDecisionView(interaction.guild.id, interaction.user.id, record.get("case_id", ""))
+        await safe_action(channel.send(embed=embed, view=view), action_name="announce appeal", guild_id=interaction.guild.id)
+    await interaction.response.send_message("📨 Đơn kháng cáo của bạn đã được gửi lên tòa (đội ngũ admin), vui lòng chờ xét xử.", ephemeral=True)
+@bot.tree.command(name="xuxykhangcao", description="[Dự phòng] Xử lý đơn kháng cáo bằng lệnh nếu nút bấm đã hết tác dụng (bot restart)")
+@admin_only()
+@app_commands.choices(quyet_dinh=[
+    app_commands.Choice(name="Chấp thuận (thả tù)", value="approve"),
+    app_commands.Choice(name="Bác đơn (tiếp tục giam)", value="reject"),
+])
+async def xuxykhangcao(interaction: discord.Interaction, member: discord.Member, quyet_dinh: app_commands.Choice[str]):
+    gid_key = str(interaction.guild.id)
+    record = jails.get(gid_key, {}).get(str(member.id))
+    if not record:
+        await interaction.response.send_message("❌ Người này không có trong danh sách bị giam.", ephemeral=True)
+        return
+    if record.get("appeal_status") != "pending":
+        await interaction.response.send_message("⚠️ Người này hiện không có đơn kháng cáo nào đang chờ xử lý.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    record["verdict_at"] = time.time()
+    record["verdict_by"] = interaction.user.id
+    if quyet_dinh.value == "approve":
+        record["appeal_status"] = "approved"
+        await save_guild_jail(interaction.guild.id)
+        await release_from_jail(interaction.guild, member.id, record)
+        await interaction.followup.send(f"✅ Đã chấp thuận kháng cáo, thả tù {member.mention}.", ephemeral=True)
+    else:
+        record["appeal_status"] = "rejected"
+        await save_guild_jail(interaction.guild.id)
+        await log(interaction.guild, f"⚖️❌ Đơn kháng cáo của {member.mention} bị {interaction.user.mention} **bác bỏ** — tiếp tục thụ án.", discord.Color.dark_red())
+        await interaction.followup.send(f"❌ Đã bác đơn kháng cáo của {member.mention}.", ephemeral=True)
 @bot.tree.command(name="togglealertowner", description="Bật/tắt DM cho owner khi có sự cố nghiêm trọng")
 @admin_only()
 async def togglealertowner(interaction: discord.Interaction):
@@ -2116,7 +2290,12 @@ async def togglealertowner(interaction: discord.Interaction):
     new_val = not s.get("alert_owner_on_critical", True)
     await set_and_save(interaction.guild.id, "alert_owner_on_critical", new_val)
     await interaction.response.send_message(f"✅ Alert owner khi nghiêm trọng: {'Bật' if new_val else 'Tắt'}", ephemeral=True)
-@bot.tree.command(name="cardstatus", description="Xem thẻ phạt & điểm vi phạm hiện tại của 1 thành viên")
+@bot.tree.command(name="diemthanthien", description="Xem điểm Thân thiện của bạn hoặc 1 thành viên khác")
+async def diemthanthien(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    target = member or interaction.user
+    score = get_friendly_score(interaction.guild.id, target.id)
+    await interaction.response.send_message(f"💙 **{target.display_name}** hiện có **{score}** điểm Thân thiện (tích lũy nhờ nhắn tin tử tế, giúp giảm mức án nếu chẳng may bị bỏ tù).", ephemeral=True)
+@bot.tree.command(name="cardstatus", description="Xem hồ sơ pháp lý: thẻ phạt, điểm vi phạm, điểm Thân thiện, tình trạng án tù của 1 thành viên")
 @admin_only()
 async def cardstatus(interaction: discord.Interaction, member: discord.Member):
     s = cfg(interaction.guild.id)
@@ -2126,11 +2305,31 @@ async def cardstatus(interaction: discord.Interaction, member: discord.Member):
     tally = card_tally.get(key, {"yellow": 0, "red": 0})
     group = get_card_group(score, s)
     group_label = {"red": "🟥 Đỏ", "yellow": "🟨 Vàng", "notice": "🟢 Cảnh cáo", "clean": "⚪ Sạch"}.get(group, "⚪ Sạch")
-    embed = discord.Embed(title=f"🎫 Thẻ phạt — {member.display_name}", color=discord.Color.blurple())
+    friendly_score = get_friendly_score(interaction.guild.id, member.id)
+    embed = discord.Embed(title=f"⚖️ Hồ sơ pháp lý — {member.display_name}", color=discord.Color.blurple())
     embed.add_field(name="Điểm vi phạm hiện tại", value=str(score), inline=True)
     embed.add_field(name="Nhóm", value=group_label, inline=True)
+    embed.add_field(name="💙 Điểm Thân thiện", value=str(friendly_score), inline=True)
     embed.add_field(name="Thẻ vàng tích lũy", value=f"{tally['yellow']}/2", inline=True)
     embed.add_field(name="Thẻ đỏ đã nhận", value=str(tally["red"]), inline=True)
+    jail_record = jails.get(str(interaction.guild.id), {}).get(str(member.id))
+    if jail_record:
+        appeal_status_label = {
+            "none": "Chưa kháng cáo", "pending": "⏳ Đang chờ xử lý",
+            "approved": "✅ Đã được chấp thuận", "rejected": "❌ Đã bị bác",
+        }.get(jail_record.get("appeal_status", "none"), "Chưa kháng cáo")
+        jailed_at = jail_record.get("jailed_at")
+        release_at = jail_record.get("release_at")
+        embed.add_field(name="🔒 Tình trạng giam giữ", value="Đang thụ án", inline=False)
+        embed.add_field(name="Mã hồ sơ", value=f"`{jail_record.get('case_id', 'N/A')}`", inline=True)
+        embed.add_field(name="Tội danh", value=jail_record.get("reason", "không rõ"), inline=True)
+        embed.add_field(name="Kháng cáo", value=appeal_status_label, inline=True)
+        if jailed_at:
+            embed.add_field(name="Ngày vào tù", value=discord.utils.format_dt(datetime.datetime.fromtimestamp(jailed_at, tz=datetime.timezone.utc), style="f"), inline=True)
+        if release_at:
+            embed.add_field(name="Dự kiến mãn hạn", value=discord.utils.format_dt(datetime.datetime.fromtimestamp(release_at, tz=datetime.timezone.utc), style="R"), inline=True)
+    else:
+        embed.add_field(name="🔓 Tình trạng giam giữ", value="Tự do — không có án tù nào", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 @bot.tree.command(name="testaimod", description="Test thử AI moderation (Groq) với 1 đoạn text, xem kết quả trực tiếp")
 @admin_only()
@@ -2143,9 +2342,11 @@ async def testaimod(interaction: discord.Interaction, text: str):
     if result is None:
         await interaction.followup.send("⚠️ Groq API lỗi hoặc timeout — kiểm tra `GROQ_API_KEY` / log console để biết chi tiết.", ephemeral=True)
         return
-    is_unsafe, categories, severity = result
+    is_unsafe, categories, severity, is_friendly = result
     if is_unsafe:
         await interaction.followup.send(f"🟨 **UNSAFE** — danh mục: {categories}\nĐộ nghiêm trọng: **{severity}** điểm (sẽ cộng vào điểm vi phạm của người gửi)", ephemeral=True)
+    elif is_friendly:
+        await interaction.followup.send("💙 **SAFE:FRIENDLY** — Groq đánh giá đây là tin nhắn thân thiện/tử tế, sẽ được cộng **1 điểm Thân thiện**.", ephemeral=True)
     else:
         await interaction.followup.send("✅ **SAFE** — Groq đánh giá nội dung này bình thường.", ephemeral=True)
 @bot.tree.command(name="toggleaimod", description="Bật/tắt kiểm duyệt toxic bằng AI (Groq/Llama Guard)")

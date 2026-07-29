@@ -89,9 +89,6 @@ DEFAULTS = {
     "scam_domains": [],
     "blocked_bot_ids": [],
     "auto_ban_suspicious_bots": True,
-    "suspicion_ban_threshold": 100,
-    "suspicion_timeout_threshold": 50,
-    "suspicion_warning_threshold": 20,
     "suspicion_decay_seconds": 600,
     "zalgo_max_combining_chars": 8,
     "lockdown_active": False,
@@ -146,6 +143,12 @@ DEFAULTS = {
     "duplicate_channel_scan_interval": 60,
     "friendly_leaderboard_channel_id": None,
     "friendly_leaderboard_last_posted_week": None,
+    "civility_start_score": 150,
+    "civility_mute10_threshold": 50,
+    "civility_mute1h_threshold": 20,
+    "civility_jail_threshold": 0,
+    "civility_good_threshold": 100,
+    "civility_average_threshold": 51,
 }
 CONFIGURABLE_INT_KEYS = [
     "raid_join_threshold", "raid_join_window", "raid_min_account_age_days", "raid_cooldown_seconds",
@@ -156,7 +159,7 @@ CONFIGURABLE_INT_KEYS = [
     "intermittent_spam_burst_size", "intermittent_spam_burst_gap", "intermittent_spam_quiet_gap",
     "intermittent_spam_burst_count", "intermittent_spam_window", "intermittent_spam_timeout_seconds",
     "mass_mention_threshold", "mass_mention_timeout_seconds", "invite_new_account_days",
-    "suspicion_ban_threshold", "suspicion_timeout_threshold", "suspicion_warning_threshold", "suspicion_decay_seconds",
+    "suspicion_decay_seconds",
     "zalgo_max_combining_chars", "backup_snapshot_interval_seconds",
     "max_webhooks_per_guild", "webhook_create_threshold", "webhook_create_window",
     "join_pattern_window", "join_pattern_min_count",
@@ -169,6 +172,8 @@ CONFIGURABLE_INT_KEYS = [
     "adaptive_trusted_action_count", "adaptive_trusted_min_age_days",
     "audit_log_cache_ttl_seconds",
     "duplicate_channel_threshold", "duplicate_channel_scan_interval",
+    "civility_start_score", "civility_mute10_threshold", "civility_mute1h_threshold",
+    "civility_jail_threshold", "civility_good_threshold", "civility_average_threshold",
 ]
 SUSPICION_WEIGHTS = {
     "badword": 10,
@@ -295,16 +300,49 @@ async def save_guild_friendly(guild_id: int):
     try:
         await asyncio.to_thread(_save_guild_friendly_sync, str(guild_id), friendly.get(str(guild_id), {}))
     except Exception:
-        logger.exception("Không thể lưu điểm Thân thiện lên Firestore cho guild %s", guild_id)
-def add_friendly_point(guild_id: int, user_id: int, points: int = 1) -> int:
+        logger.exception("Không thể lưu điểm Văn minh lên Firestore cho guild %s", guild_id)
+def get_civility_score(guild_id: int, user_id: int, s: Optional[dict] = None) -> int:
+    """Điểm văn minh hiện tại. Nếu user chưa có hồ sơ, khởi tạo mốc mặc định (150)."""
+    s = s or cfg(guild_id)
     gid_key, uid_key = str(guild_id), str(user_id)
     bucket = friendly.setdefault(gid_key, {})
-    entry = bucket.setdefault(uid_key, {"score": 0, "updated_at": time.time()})
-    entry["score"] = entry.get("score", 0) + points
+    entry = bucket.get(uid_key)
+    if entry is None:
+        start = s.get("civility_start_score", 150)
+        entry = {"score": start, "updated_at": time.time()}
+        bucket[uid_key] = entry
+    return entry.get("score", s.get("civility_start_score", 150))
+def set_civility_score(guild_id: int, user_id: int, new_score: int) -> int:
+    gid_key, uid_key = str(guild_id), str(user_id)
+    bucket = friendly.setdefault(gid_key, {})
+    entry = bucket.setdefault(uid_key, {"score": new_score, "updated_at": time.time()})
+    entry["score"] = new_score
     entry["updated_at"] = time.time()
     return entry["score"]
+def add_civility_points(guild_id: int, user_id: int, delta: int, s: Optional[dict] = None) -> int:
+    """Cộng/trừ điểm văn minh (delta có thể âm khi vi phạm, dương khi tử tế). Điểm không xuống dưới 0."""
+    current = get_civility_score(guild_id, user_id, s)
+    new_score = max(0, current + delta)
+    return set_civility_score(guild_id, user_id, new_score)
+def reset_civility_score(guild_id: int, user_id: int, s: Optional[dict] = None) -> int:
+    s = s or cfg(guild_id)
+    return set_civility_score(guild_id, user_id, s.get("civility_start_score", 150))
+def get_civility_group(score: int, s: dict) -> str:
+    """Xếp điểm văn minh còn lại vào 1 trong 3 nhóm: tốt / trung bình / xấu."""
+    if score >= s.get("civility_good_threshold", 100):
+        return "good"
+    elif score >= s.get("civility_average_threshold", 51):
+        return "average"
+    return "bad"
+CIVILITY_GROUP_LABELS = {
+    "good": "💚 Văn minh tốt",
+    "average": "💛 Văn minh trung bình",
+    "bad": "❤️ Văn minh xấu",
+}
+def add_friendly_point(guild_id: int, user_id: int, points: int = 1) -> int:
+    return add_civility_points(guild_id, user_id, points)
 def get_friendly_score(guild_id: int, user_id: int) -> int:
-    return friendly.get(str(guild_id), {}).get(str(user_id), {}).get("score", 0)
+    return get_civility_score(guild_id, user_id)
 def _save_guild_backup_sync(guild_id: str, data: dict):
     db.collection(BACKUP_COLLECTION).document(guild_id).set(data)
 async def save_guild_backup(guild_id: int):
@@ -531,7 +569,7 @@ _UNSAFE_CATEGORY_LABELS = {
     "S15": "Chửi thề/Xúc phạm/Toxic", "S16": "Từ ngữ phân biệt chủng tộc/kỳ thị (né tránh bộ lọc)",
 }
 # Điểm nghiêm trọng theo từng danh mục — nhóm nặng (trẻ em, bạo lực, tự hại, vũ khí, kỳ thị chủng tộc)
-# cho điểm cao hẳn để bị xử lý (thẻ đỏ) ngay từ lần đầu, thay vì phải tích lũy nhiều lần như vi phạm nhẹ.
+# trừ điểm văn minh cao hẳn để bị xử lý (mute/tù) ngay từ lần đầu, thay vì phải tích lũy nhiều lần như vi phạm nhẹ.
 _CATEGORY_SEVERITY = {
     "S4": 100, "S1": 60, "S7": 60, "S5": 60, "S2": 60, "S16": 60,
     "S8": 35, "S10": 30, "S3": 30, "S12": 30, "S15": 25,
@@ -586,7 +624,7 @@ unsafe
 S15,S16 (liệt kê các mã nhóm vi phạm, cách nhau bởi dấu phẩy, không có khoảng trắng)"""
 async def check_toxic_groq(content: str) -> tuple[bool, str, int, bool] | None:
     """Gọi Groq (LLM tổng quát, prompt tự viết) để phân loại nội dung độc hại/né bộ lọc, và
-    tiện thể nhận diện tin nhắn thân thiện/tử tế để cộng điểm Thân thiện.
+    tiện thể nhận diện tin nhắn thân thiện/tử tế để cộng điểm Văn minh.
     Trả về (is_unsafe, nhãn danh mục tiếng Việt, điểm nghiêm trọng, is_friendly) hoặc None nếu lỗi/timeout (fail-open)."""
     if not GROQ_API_KEY or not content or not content.strip():
         return None
@@ -735,21 +773,16 @@ def is_protected(member: discord.abc.User, guild_id: int | None = None) -> bool:
         return True
     return member.guild_permissions.administrator
 def add_suspicion(guild_id: int, user_id: int, category: str, decay_seconds: int, points_override: int | None = None) -> int:
+    """Vi phạm sẽ TRỪ trực tiếp vào điểm văn minh của user (thang điểm văn minh, không còn
+    tích lũy 'điểm nghi vấn' tăng dần). decay_seconds được giữ tham số để tương thích chữ ký
+    hàm cũ nhưng không còn dùng để hồi điểm — điểm văn minh chỉ được hồi khi mãn hạn tù
+    (reset về civility_start_score) hoặc khi user nhắn tin tử tế (AI friendly, +điểm)."""
     points = points_override if points_override is not None else SUSPICION_WEIGHTS.get(category, 10)
+    s = cfg(guild_id)
+    new_score = add_civility_points(guild_id, user_id, -points, s)
     key = (guild_id, user_id)
-    now = time.time()
-    entry = suspicion_scores.get(key)
-    if entry is None:
-        score, last_ts = 0.0, now
-    else:
-        score, last_ts = entry
-    if decay_seconds > 0:
-        elapsed = now - last_ts
-        decay = (elapsed / decay_seconds) * 10
-        score = max(0.0, score - decay)
-    score += points
-    suspicion_scores[key] = [score, now]
-    return int(score)
+    suspicion_scores[key] = [float(new_score), time.time()]
+    return new_score
 _warned_users: set[tuple[int, int]] = set()
 def cleanup_suspicion_scores(max_age_seconds: int = 3600):
     now = time.time()
@@ -759,7 +792,9 @@ def cleanup_suspicion_scores(max_age_seconds: int = 3600):
         _warned_users.discard(k)
         card_tally.pop(k, None)
 async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, reason_text: str):
-    """Tước tạm toàn bộ role hiện có, gán role tù nhân, và hẹn giờ trả lại sau N giờ (bản án có thể được giảm nếu điểm Thân thiện cao)."""
+    """Tước tạm toàn bộ role hiện có, gán role tù nhân, và hẹn giờ trả lại sau N giờ.
+    Kích hoạt khi điểm văn minh của member chạm mốc 0đ — thời hạn tù cố định theo cấu hình
+    jail_duration_hours (mặc định 1 ngày = 24h)."""
     jail_role_id = s.get("jail_role_id")
     jail_role = guild.get_role(jail_role_id) if jail_role_id else None
     if jail_role is None:
@@ -770,11 +805,7 @@ async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, rea
     if removable:
         await safe_action(member.remove_roles(*removable, reason=f"Jail: {reason_text}"), action_name="strip roles for jail", guild_id=guild.id)
     await safe_action(member.add_roles(jail_role, reason=f"Jail: {reason_text}"), action_name="add jail role", guild_id=guild.id)
-    base_hours = s.get("jail_duration_hours", 24)
-    friendly_score = get_friendly_score(guild.id, member.id)
-    # Cứ 20 điểm Thân thiện được giảm 1 giờ án, tối đa giảm nửa mức án (án tù không thể về 0 giờ).
-    reduction = min(friendly_score // 20, base_hours // 2)
-    hours = max(1, base_hours - reduction)
+    hours = s.get("jail_duration_hours", 24)
     now = time.time()
     release_at = now + hours * 3600
     gid_key = str(guild.id)
@@ -782,7 +813,7 @@ async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, rea
     jails.setdefault(gid_key, {})[str(member.id)] = {
         "removed_role_ids": removed_ids, "release_at": release_at,
         "jailed_at": now, "case_id": case_id, "reason": reason_text,
-        "base_hours": base_hours, "hours": hours, "friendly_discount_hours": reduction,
+        "base_hours": hours, "hours": hours, "friendly_discount_hours": 0,
         "appeal_status": "none", "appeal_text": None, "appeal_at": None,
         "verdict_at": None, "verdict_by": None,
     }
@@ -790,14 +821,15 @@ async def jail_member(guild: discord.Guild, member: discord.Member, s: dict, rea
     channel_id = s.get("jail_announce_channel_id")
     channel = guild.get_channel(channel_id) if channel_id else None
     if channel:
-        discount_note = f" (đã giảm {reduction}h nhờ **{friendly_score} điểm Thân thiện**)" if reduction > 0 else ""
         embed = discord.Embed(
             title="⚖️ TÒA TUYÊN ÁN",
             description=(
                 f"Bị cáo: {member.mention}\n"
                 f"Tội danh: {reason_text}\n"
-                f"Mức án: **{hours} giờ** giam giữ{discount_note}\n"
+                f"Mức án: **{hours} giờ** giam giữ (điểm văn minh đã về 0đ)\n"
                 f"Mã hồ sơ: `{case_id}`\n\n"
+                f"Sau khi mãn hạn, điểm văn minh sẽ được cấp lại **{s.get('civility_start_score', 150)}đ** "
+                f"và xếp vào nhóm **văn minh không thân thiện**.\n"
                 f"Bị cáo có quyền nộp đơn kháng cáo bằng lệnh `/khangcao` trong thời gian thụ án."
             ),
             color=discord.Color.dark_red(),
@@ -818,7 +850,10 @@ async def release_from_jail(guild: discord.Guild, user_id: int, record: dict):
         restore_roles = [r for r in restore_roles if r is not None]
         if restore_roles:
             await safe_action(member.add_roles(*restore_roles, reason="Hết hạn giam giữ: trả lại role cũ"), action_name="restore roles after jail", guild_id=guild.id)
-        await log(guild, f"⚖️🔓 {member.mention} đã **mãn hạn tù**, được trả lại role cũ. Hồ sơ án tích đã đóng, điểm vi phạm được **xóa sạch** — làm lại từ đầu.", discord.Color.green())
+        s = cfg(guild.id)
+        new_score = reset_civility_score(guild.id, user_id, s)
+        await save_guild_friendly(guild.id)
+        await log(guild, f"⚖️🔓 {member.mention} đã **mãn hạn tù**, được trả lại role cũ. Điểm văn minh được cấp lại **{new_score}đ**, xếp vào nhóm **văn minh không thân thiện**.", discord.Color.green())
     gid_key = str(guild.id)
     jails.get(gid_key, {}).pop(str(user_id), None)
     await save_guild_jail(guild.id)
@@ -843,7 +878,7 @@ def _current_vn_week_key(now_vn: datetime.datetime) -> str:
     iso = now_vn.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
 async def post_weekly_friendly_leaderboard(guild: discord.Guild, s: dict):
-    """Đăng bảng xếp hạng điểm Thân thiện hàng tuần — chỉ vinh danh, không bêu tên,
+    """Đăng bảng xếp hạng điểm Văn minh hàng tuần — chỉ vinh danh, không bêu tên,
     không tag ai, không có cột 'tội danh'."""
     channel_id = s.get("friendly_leaderboard_channel_id")
     channel = guild.get_channel(channel_id) if channel_id else None
@@ -871,7 +906,7 @@ async def post_weekly_friendly_leaderboard(guild: discord.Guild, s: dict):
         prefix = medals[i] if i < len(medals) else f"`#{i+1}`"
         lines.append(f"{prefix} **{member.display_name}** — {score} điểm")
     embed = discord.Embed(
-        title="🌟 Bảng vinh danh Thân thiện tuần này",
+        title="🌟 Bảng vinh danh Văn minh tuần này",
         description="\n".join(lines),
         color=discord.Color.gold(),
         timestamp=discord.utils.utcnow(),
@@ -894,62 +929,55 @@ async def weekly_friendly_leaderboard_loop():
                 await set_and_save(guild.id, "friendly_leaderboard_last_posted_week", week_key)
         await asyncio.sleep(60)
 def get_card_group(score: int, s: dict) -> str:
-    """Xếp điểm vi phạm vào nhóm: nhẹ / thẻ vàng / thẻ đỏ — dùng cho hiển thị & quyết định."""
-    if score >= s["suspicion_ban_threshold"]:
-        return "red"
-    elif score >= s["suspicion_timeout_threshold"]:
-        return "yellow"
-    elif score >= s.get("suspicion_warning_threshold", 20):
-        return "notice"
-    return "clean"
+    """Alias tuong thich nguoc - tra ve nhom van minh (good/average/bad) thay cho the vang/do cu."""
+    return get_civility_group(score, s)
 async def apply_suspicion_consequence(guild: discord.Guild, member: discord.Member, score: int, s: dict):
+    """Ap hinh phat dua tren DIEM VAN MINH con lai cua member sau khi bi tru (score = diem con lai).
+    Chi kich hoat hinh phat khi diem VUA XUONG DUOI mot moc moi ke tu lan xu ly gan nhat,
+    tranh phat lap lai neu 1 vi pham nang khien diem tut qua nhieu moc cung luc, va tranh
+    phat lap moi khi co vi pham nho trong luc diem da o duoi day."""
     key = (guild.id, member.id)
-    group = get_card_group(score, s)
-    tally = card_tally.setdefault(key, {"yellow": 0, "red": 0})
-    if group == "red":
-        tally["red"] += 1
-        _warned_users.discard(key)
-        if tally["red"] >= 3:
-            jailed = await jail_member(guild, member, s, f"nhận thẻ đỏ lần {tally['red']} (điểm vi phạm {score})")
-            bump_stat(guild.id, "jail", 1)
-            if jailed:
-                await log(guild, f"⛓️🟥 {member.mention} nhận **THẺ ĐỎ LẦN {tally['red']}** → **BỎ TÙ {s.get('jail_duration_hours', 24)} giờ**, tước toàn bộ role tạm thời (**{score}** điểm, nhóm: đỏ)", discord.Color.dark_red(), critical=True)
-            else:
-                await safe_action(member.ban(reason=f"Thẻ đỏ lần {tally['red']} — điểm vi phạm {score} (jail role chưa cấu hình)"), action_name="ban after 3rd red card fallback", guild_id=guild.id)
-                bump_stat(guild.id, "ban", 1)
-                await log(guild, f"⛔🟥 {member.mention} nhận **THẺ ĐỎ LẦN {tally['red']}** → BAN vĩnh viễn (chưa cấu hình role tù, dùng ban dự phòng) (**{score}** điểm)", discord.Color.dark_red(), critical=True)
-        elif tally["red"] == 2:
-            until = discord.utils.utcnow() + datetime.timedelta(hours=1)
-            await safe_action(member.timeout(until, reason=f"Thẻ đỏ lần 2 — điểm vi phạm {score}"), action_name="timeout on 2nd red card", guild_id=guild.id)
-            bump_stat(guild.id, "timeout", 1)
-            tally["yellow"] = 0
-            await log(guild, f"🟥🟥 {member.mention} nhận **THẺ ĐỎ LẦN 2** → truất quyền thi đấu **1 giờ** (**{score}** điểm, nhóm: đỏ). Thẻ đỏ tiếp theo = BAN vĩnh viễn.", discord.Color.dark_red(), critical=True)
-        else:
-            until = discord.utils.utcnow() + datetime.timedelta(minutes=15)
-            await safe_action(member.timeout(until, reason=f"Thẻ đỏ — điểm vi phạm {score}"), action_name="timeout on red card", guild_id=guild.id)
-            bump_stat(guild.id, "timeout", 1)
-            tally["yellow"] = 0
-            await log(guild, f"🟥 {member.mention} nhận **THẺ ĐỎ** → truất quyền thi đấu 15 phút (**{score}** điểm, nhóm: đỏ). Thẻ đỏ tiếp theo = mute 1 giờ.", discord.Color.dark_red(), critical=True)
-    elif group == "yellow":
-        tally["yellow"] += 1
-        _warned_users.discard(key)
-        if tally["yellow"] >= 2:
-            tally["yellow"] = 0
-            tally["red"] += 1
-            until = discord.utils.utcnow() + datetime.timedelta(minutes=15)
-            await safe_action(member.timeout(until, reason=f"2 thẻ vàng = 1 thẻ đỏ — điểm vi phạm {score}"), action_name="timeout on double yellow", guild_id=guild.id)
-            bump_stat(guild.id, "timeout", 1)
-            await log(guild, f"🟨🟨→🟥 {member.mention} nhận **THẺ VÀNG THỨ 2** → tự động gộp thành **THẺ ĐỎ**, truất quyền 15 phút (**{score}** điểm)", discord.Color.dark_red(), critical=True)
-        else:
-            await log(guild, f"🟨 {member.mention} nhận **THẺ VÀNG ({tally['yellow']}/2)** do điểm vi phạm cao (**{score}** điểm, nhóm: vàng)", discord.Color.orange())
-    elif group == "notice":
-        if key not in _warned_users:
-            _warned_users.add(key)
-            bump_stat(guild.id, "warning", 1)
-            await log(guild, f"🟢 {member.mention} nhận **cảnh cáo nhẹ** (nhóm: xanh, **{score}** điểm, chưa đủ ngưỡng thẻ vàng)", discord.Color.green())
-            await dm_warning(member, "bạn vừa nhận một cảnh cáo do vi phạm nội quy. Vi phạm tiếp sẽ nhận thẻ vàng, 2 thẻ vàng = thẻ đỏ.")
+    mute10_th = s.get("civility_mute10_threshold", 50)
+    mute1h_th = s.get("civility_mute1h_threshold", 20)
+    jail_th = s.get("civility_jail_threshold", 0)
+    tally = card_tally.setdefault(key, {"last_handled_threshold": None})
+    last_handled = tally.get("last_handled_threshold")
+    if score <= jail_th:
+        new_threshold = "jail"
+    elif score <= mute1h_th:
+        new_threshold = "mute1h"
+    elif score <= mute10_th:
+        new_threshold = "mute10"
     else:
-        _warned_users.discard(key)
+        tally["last_handled_threshold"] = None
+        return
+    severity_order = {"mute10": 1, "mute1h": 2, "jail": 3}
+    if last_handled is not None and severity_order[new_threshold] <= severity_order.get(last_handled, 0):
+        return
+    tally["last_handled_threshold"] = new_threshold
+    group = get_civility_group(score, s)
+    group_label = CIVILITY_GROUP_LABELS.get(group, "")
+    if new_threshold == "jail":
+        jailed = await jail_member(guild, member, s, f"diem van minh cham day ({score}d)")
+        bump_stat(guild.id, "jail", 1)
+        if jailed:
+            await log(guild, f"⛓️❤️ {member.mention} co **diem van minh ve {score}d** → **BO TU {s.get('jail_duration_hours', 24)} gio**, tuoc toan bo role tam thoi. Sau khi man han se duoc cap lai **{s.get('civility_start_score', 150)}d** va xep vao nhom van minh xau.", discord.Color.dark_red(), critical=True)
+        else:
+            await safe_action(member.ban(reason=f"Diem van minh ve {score}d (jail role chua cau hinh)"), action_name="ban after civility bottom fallback", guild_id=guild.id)
+            bump_stat(guild.id, "ban", 1)
+            await log(guild, f"⛔❤️ {member.mention} co **diem van minh ve {score}d** → BAN vinh vien (chua cau hinh role tu, dung ban du phong)", discord.Color.dark_red(), critical=True)
+    elif new_threshold == "mute1h":
+        until = discord.utils.utcnow() + datetime.timedelta(hours=1)
+        await safe_action(member.timeout(until, reason=f"Diem van minh con {score}d"), action_name="timeout civility mute1h", guild_id=guild.id)
+        bump_stat(guild.id, "timeout", 1)
+        await log(guild, f"🟧 {member.mention} con **{score}d van minh** ({group_label}) → **MUTE 1 GIO**. Ve {jail_th}d se bi bo tu.", discord.Color.orange(), critical=True)
+        await dm_warning(member, f"diem van minh cua ban da giam con {score}d va ban bi mute 1 gio. Ve {jail_th}d se bi bo tu.")
+    elif new_threshold == "mute10":
+        until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
+        await safe_action(member.timeout(until, reason=f"Diem van minh con {score}d"), action_name="timeout civility mute10", guild_id=guild.id)
+        bump_stat(guild.id, "timeout", 1)
+        await log(guild, f"🟨 {member.mention} con **{score}d van minh** ({group_label}) → **MUTE 10 PHUT**.", discord.Color.gold())
+        await dm_warning(member, f"diem van minh cua ban da giam con {score}d. Ve {mute1h_th}d se bi mute 1 gio, ve {jail_th}d se bi bo tu.")
 async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
     if url in _webhook_cache:
         return _webhook_cache[url]
@@ -962,24 +990,24 @@ async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
         return None
 _WARNING_COLORS = {discord.Color.gold(), discord.Color.dark_orange()}
 _RED_CARD_LINES = [
-    "VÀOOOOOOOO...ngoài đời thì không, nhưng thẻ đỏ thì CÓ! 🟥 Trọng tài chỉ thẳng đường hầm.",
-    "Còi dài vang lên! 📯 Trọng tài rút thẻ đỏ, cầu thủ bị mời rời sân NGAY LẬP TỨC.",
-    "Pha vào bóng quá thô bạo! Thẻ đỏ trực tiếp, không cần VAR xem lại. 🟥",
-    "VAR xác nhận: LỖI RÕ RÀNG. Trọng tài rút thẻ đỏ, đuổi khỏi sân! 🟥⚽",
+    "Điểm văn minh chạm đáy! ❤️ Trọng tài chỉ thẳng đường hầm — mời ra khỏi sân.",
+    "Còi dài vang lên! 📯 Vi phạm nghiêm trọng, điểm văn minh cạn kiệt.",
+    "Vi phạm quá thô bạo! Điểm văn minh về đáy, xử lý ngay không cần xem lại. ❤️",
+    "Xác nhận: VI PHẠM RÕ RÀNG. Điểm văn minh về đáy, xử lý nghiêm! ❤️⚽",
 ]
 _YELLOW_CARD_LINES = [
-    "Tít! 🟨 Trọng tài rút thẻ vàng, ghi tên vào sổ theo dõi.",
-    "Cảnh cáo! Trọng tài giơ cao thẻ vàng trước mặt cầu thủ. 🟨",
-    "Phạm lỗi chiến thuật — thẻ vàng cho vào sổ, tái phạm là thẻ đỏ. 🟨",
+    "Tít! 🟧 Điểm văn minh giảm sâu, ghi tên vào sổ theo dõi.",
+    "Cảnh báo! Điểm văn minh của bạn đang ở mức thấp. 🟧",
+    "Phạm lỗi ứng xử — điểm văn minh giảm, tái phạm sẽ nặng hơn. 🟧",
 ]
 def _build_log_embed(guild: discord.Guild, text: str, color, critical: bool) -> discord.Embed:
     if critical:
-        title = "🟥⚽ THẺ ĐỎ — TRUẤT QUYỀN THI ĐẤU"
+        title = "❤️⚽ VĂN MINH XẤU — XỬ LÝ NGHIÊM"
         embed_color = discord.Color.red()
         commentary = random.choice(_RED_CARD_LINES)
         footer = "🎙️ Bình luận viên: Security Bot • Trọng tài chính"
     elif color in _WARNING_COLORS:
-        title = "🟨⚽ THẺ VÀNG — CẢNH BÁO"
+        title = "🟧⚽ ĐIỂM VĂN MINH GIẢM — CẢNH BÁO"
         embed_color = discord.Color.gold()
         commentary = random.choice(_YELLOW_CARD_LINES)
         footer = "🎙️ Bình luận viên: Security Bot • Trợ lý trọng tài"
@@ -1989,9 +2017,9 @@ async def on_message(message: discord.Message):
                 await safe_action(message.delete(), action_name="delete AI-flagged toxic message", guild_id=guild_id)
                 score = add_suspicion(guild_id, member.id, "ai_toxic", s["suspicion_decay_seconds"], points_override=severity)
                 bump_stat(guild_id, "ai_toxic_blocked", 1)
-                group = get_card_group(score, s)
-                group_label = {"red": "🟥 nhóm ĐỎ", "yellow": "🟨 nhóm VÀNG", "notice": "🟢 nhóm cảnh cáo"}.get(group, "chưa xếp nhóm")
-                if action == "timeout" and group == "clean":
+                group = get_civility_group(score, s)
+                group_label = CIVILITY_GROUP_LABELS.get(group, "chưa xếp nhóm")
+                if action == "timeout" and group == "good":
                     until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
                     await safe_action(member.timeout(until, reason=f"AI moderation: {categories}"), action_name="timeout AI-flagged member", guild_id=guild_id)
                 await log(message.guild, f"🤖⚠️ AI (Groq) phát hiện nội dung độc hại ({categories}, độ nghiêm trọng {severity} điểm, {group_label}) từ {member.mention}", discord.Color.gold())
@@ -2201,7 +2229,7 @@ async def on_message(message: discord.Message):
                 await softban(message.guild, member, reason="Anti-spam: bot lặp lại cùng nội dung", delete_seconds=s["raid_softban_delete_seconds"])
             else:
                 score = add_suspicion(guild_id, member.id, "spam_slow", s["suspicion_decay_seconds"])
-                if score >= s["suspicion_timeout_threshold"]:
+                if score <= s.get("civility_mute10_threshold", 50):
                     until = discord.utils.utcnow() + datetime.timedelta(seconds=s["slow_spam_timeout_seconds"])
                     await safe_action(
                         member.timeout(until, reason="Anti-spam: lặp lại cùng 1 nội dung nhiều lần"),
@@ -2246,7 +2274,7 @@ async def setlogwebhook(interaction: discord.Interaction, url: str):
     await set_and_save(interaction.guild.id, "log_webhook_url", url)
     _webhook_cache.pop(url, None)
     await interaction.response.send_message("✅ Đã đặt webhook log.", ephemeral=True)
-@bot.tree.command(name="setjailrole", description="Đặt role tù nhân dùng khi bỏ tù (thẻ đỏ lần 3)")
+@bot.tree.command(name="setjailrole", description="Đặt role tù nhân dùng khi bỏ tù (điểm văn minh về 0)")
 @admin_only()
 async def setjailrole(interaction: discord.Interaction, role: discord.Role):
     await set_and_save(interaction.guild.id, "jail_role_id", role.id)
@@ -2261,12 +2289,12 @@ async def setjailchannel(interaction: discord.Interaction, channel: discord.Text
 async def setjailduration(interaction: discord.Interaction, hours: int):
     await set_and_save(interaction.guild.id, "jail_duration_hours", max(1, hours))
     await interaction.response.send_message(f"✅ Thời gian bỏ tù: {max(1, hours)} giờ", ephemeral=True)
-@bot.tree.command(name="setfriendlychannel", description="Đặt kênh đăng bảng vinh danh Thân thiện hàng tuần (Chủ nhật 23:59)")
+@bot.tree.command(name="setfriendlychannel", description="Đặt kênh đăng bảng vinh danh Văn minh hàng tuần (Chủ nhật 23:59)")
 @admin_only()
 async def setfriendlychannel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_and_save(interaction.guild.id, "friendly_leaderboard_channel_id", channel.id)
-    await interaction.response.send_message(f"✅ Đã đặt kênh vinh danh Thân thiện: {channel.mention}", ephemeral=True)
-@bot.tree.command(name="postfriendlyboard", description="Đăng thử bảng vinh danh Thân thiện ngay bây giờ (không chờ cuối tuần)")
+    await interaction.response.send_message(f"✅ Đã đặt kênh vinh danh Văn minh: {channel.mention}", ephemeral=True)
+@bot.tree.command(name="postfriendlyboard", description="Đăng thử bảng vinh danh Văn minh ngay bây giờ (không chờ cuối tuần)")
 @admin_only()
 async def postfriendlyboard(interaction: discord.Interaction):
     s = cfg(interaction.guild.id)
@@ -2275,7 +2303,7 @@ async def postfriendlyboard(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     await post_weekly_friendly_leaderboard(interaction.guild, s)
-    await interaction.followup.send("✅ Đã đăng bảng vinh danh Thân thiện.", ephemeral=True)
+    await interaction.followup.send("✅ Đã đăng bảng vinh danh Văn minh.", ephemeral=True)
 @bot.tree.command(name="unjail", description="Thả tù thủ công cho 1 thành viên, trả lại role cũ")
 @admin_only()
 async def unjail(interaction: discord.Interaction, member: discord.Member):
@@ -2395,28 +2423,31 @@ async def togglealertowner(interaction: discord.Interaction):
     new_val = not s.get("alert_owner_on_critical", True)
     await set_and_save(interaction.guild.id, "alert_owner_on_critical", new_val)
     await interaction.response.send_message(f"✅ Alert owner khi nghiêm trọng: {'Bật' if new_val else 'Tắt'}", ephemeral=True)
-@bot.tree.command(name="diemthanthien", description="Xem điểm Thân thiện của bạn hoặc 1 thành viên khác")
+@bot.tree.command(name="diemthanthien", description="Xem điểm Văn minh của bạn hoặc 1 thành viên khác")
 async def diemthanthien(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     target = member or interaction.user
-    score = get_friendly_score(interaction.guild.id, target.id)
-    await interaction.response.send_message(f"💙 **{target.display_name}** hiện có **{score}** điểm Thân thiện (tích lũy nhờ nhắn tin tử tế, giúp giảm mức án nếu chẳng may bị bỏ tù).", ephemeral=True)
-@bot.tree.command(name="cardstatus", description="Xem hồ sơ pháp lý: thẻ phạt, điểm vi phạm, điểm Thân thiện, tình trạng án tù của 1 thành viên")
+    s = cfg(interaction.guild.id)
+    score = get_civility_score(interaction.guild.id, target.id, s)
+    group = get_civility_group(score, s)
+    group_label = CIVILITY_GROUP_LABELS.get(group, "")
+    await interaction.response.send_message(
+        f"{group_label}\n**{target.display_name}** hiện có **{score}đ** Văn minh (khởi điểm {s.get('civility_start_score', 150)}đ, "
+        f"trừ khi vi phạm, cộng khi nhắn tin tử tế). "
+        f"Còn ≤{s.get('civility_mute10_threshold', 50)}đ = mute 10p, ≤{s.get('civility_mute1h_threshold', 20)}đ = mute 1h, "
+        f"về {s.get('civility_jail_threshold', 0)}đ = bỏ tù {s.get('jail_duration_hours', 24)}h rồi cấp lại điểm.",
+        ephemeral=True,
+    )
+@bot.tree.command(name="cardstatus", description="Xem hồ sơ pháp lý: điểm Văn minh, nhóm xếp loại, tình trạng án tù của 1 thành viên")
 @admin_only()
 async def cardstatus(interaction: discord.Interaction, member: discord.Member):
     s = cfg(interaction.guild.id)
-    key = (interaction.guild.id, member.id)
-    entry = suspicion_scores.get(key)
-    score = int(entry[0]) if entry else 0
-    tally = card_tally.get(key, {"yellow": 0, "red": 0})
-    group = get_card_group(score, s)
-    group_label = {"red": "🟥 Đỏ", "yellow": "🟨 Vàng", "notice": "🟢 Cảnh cáo", "clean": "⚪ Sạch"}.get(group, "⚪ Sạch")
-    friendly_score = get_friendly_score(interaction.guild.id, member.id)
+    score = get_civility_score(interaction.guild.id, member.id, s)
+    group = get_civility_group(score, s)
+    group_label = CIVILITY_GROUP_LABELS.get(group, "")
     embed = discord.Embed(title=f"⚖️ Hồ sơ pháp lý — {member.display_name}", color=discord.Color.blurple())
-    embed.add_field(name="Điểm vi phạm hiện tại", value=str(score), inline=True)
+    embed.add_field(name="💚 Điểm Văn minh hiện tại", value=f"{score}đ", inline=True)
     embed.add_field(name="Nhóm", value=group_label, inline=True)
-    embed.add_field(name="💙 Điểm Thân thiện", value=str(friendly_score), inline=True)
-    embed.add_field(name="Thẻ vàng tích lũy", value=f"{tally['yellow']}/2", inline=True)
-    embed.add_field(name="Thẻ đỏ đã nhận", value=str(tally["red"]), inline=True)
+    embed.add_field(name="Điểm khởi đầu", value=f"{s.get('civility_start_score', 150)}đ", inline=True)
     jail_record = jails.get(str(interaction.guild.id), {}).get(str(member.id))
     if jail_record:
         appeal_status_label = {
@@ -2449,9 +2480,9 @@ async def testaimod(interaction: discord.Interaction, text: str):
         return
     is_unsafe, categories, severity, is_friendly = result
     if is_unsafe:
-        await interaction.followup.send(f"🟨 **UNSAFE** — danh mục: {categories}\nĐộ nghiêm trọng: **{severity}** điểm (sẽ cộng vào điểm vi phạm của người gửi)", ephemeral=True)
+        await interaction.followup.send(f"🟨 **UNSAFE** — danh mục: {categories}\nĐộ nghiêm trọng: **{severity}** điểm (sẽ bị trừ vào điểm Văn minh của người gửi)", ephemeral=True)
     elif is_friendly:
-        await interaction.followup.send("💙 **SAFE:FRIENDLY** — Groq đánh giá đây là tin nhắn thân thiện/tử tế, sẽ được cộng **1 điểm Thân thiện**.", ephemeral=True)
+        await interaction.followup.send("💚 **SAFE:FRIENDLY** — Groq đánh giá đây là tin nhắn thân thiện/tử tế, sẽ được cộng **1 điểm Văn minh**.", ephemeral=True)
     else:
         await interaction.followup.send("✅ **SAFE** — Groq đánh giá nội dung này bình thường.", ephemeral=True)
 @bot.tree.command(name="toggleaimod", description="Bật/tắt kiểm duyệt toxic bằng AI (Groq/Llama Guard)")
@@ -2949,7 +2980,16 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Raid cross-channel", value=f"{s['raid_channel_spam_threshold']} kênh / {s['raid_channel_spam_window']}s → softban", inline=False)
     embed.add_field(name="Mass mention", value=f"{s['mass_mention_threshold']} mentions/tin → timeout", inline=False)
     embed.add_field(name="Invite từ tk mới", value=f"< {s['invite_new_account_days']} ngày tuổi → xóa", inline=False)
-    embed.add_field(name="Suspicion ban/timeout", value=f"{s['suspicion_ban_threshold']} / {s['suspicion_timeout_threshold']} điểm", inline=False)
+    embed.add_field(
+        name="💚 Thang điểm Văn minh",
+        value=(
+            f"Khởi đầu: {s.get('civility_start_score', 150)}đ — "
+            f"còn ≤{s.get('civility_mute10_threshold', 50)}đ = mute 10p, "
+            f"≤{s.get('civility_mute1h_threshold', 20)}đ = mute 1h, "
+            f"về {s.get('civility_jail_threshold', 0)}đ = bỏ tù {s.get('jail_duration_hours', 24)}h"
+        ),
+        inline=False,
+    )
     embed.add_field(name="Mass ban/kick", value=f"{s['mass_ban_threshold']}/{s['mass_ban_window']}s — {s['mass_kick_threshold']}/{s['mass_kick_window']}s", inline=False)
     embed.add_field(name="Perm wipe", value=f"{s['perm_wipe_threshold']} sửa / {s['perm_wipe_window']}s", inline=False)
     embed.add_field(name="Webhook limit", value=f"{s['max_webhooks_per_guild']} max — {s['webhook_create_threshold']}/{s['webhook_create_window']}s = spam", inline=False)

@@ -149,6 +149,11 @@ DEFAULTS = {
     "civility_jail_threshold": 0,
     "civility_good_threshold": 100,
     "civility_average_threshold": 51,
+    "spam_exempt_channel_id": 1528557774597001298,
+    "spam_exempt_role_id": 1528557547760521266,
+    "spam_exempt_keyword": "llaudon",
+    "rules_channel_id": 1528554780409204858,
+    "read_rules_seconds": 300,
 }
 CONFIGURABLE_INT_KEYS = [
     "raid_join_threshold", "raid_join_window", "raid_min_account_age_days", "raid_cooldown_seconds",
@@ -174,6 +179,7 @@ CONFIGURABLE_INT_KEYS = [
     "duplicate_channel_threshold", "duplicate_channel_scan_interval",
     "civility_start_score", "civility_mute10_threshold", "civility_mute1h_threshold",
     "civility_jail_threshold", "civility_good_threshold", "civility_average_threshold",
+    "read_rules_seconds",
 ]
 SUSPICION_WEIGHTS = {
     "badword": 10,
@@ -989,37 +995,29 @@ async def get_log_webhook(url: str) -> Optional[discord.Webhook]:
         logger.warning("Webhook URL không hợp lệ")
         return None
 _WARNING_COLORS = {discord.Color.gold(), discord.Color.dark_orange()}
-_RED_CARD_LINES = [
-    "Điểm văn minh chạm đáy! ❤️ Trọng tài chỉ thẳng đường hầm — mời ra khỏi sân.",
-    "Còi dài vang lên! 📯 Vi phạm nghiêm trọng, điểm văn minh cạn kiệt.",
-    "Vi phạm quá thô bạo! Điểm văn minh về đáy, xử lý ngay không cần xem lại. ❤️",
-    "Xác nhận: VI PHẠM RÕ RÀNG. Điểm văn minh về đáy, xử lý nghiêm! ❤️⚽",
-]
-_YELLOW_CARD_LINES = [
-    "Tít! 🟧 Điểm văn minh giảm sâu, ghi tên vào sổ theo dõi.",
-    "Cảnh báo! Điểm văn minh của bạn đang ở mức thấp. 🟧",
-    "Phạm lỗi ứng xử — điểm văn minh giảm, tái phạm sẽ nặng hơn. 🟧",
-]
+_LOG_LEAD_EMOJI_RE = re.compile(
+    r"^([\U0001F1E6-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]+)\s*"
+)
 def _build_log_embed(guild: discord.Guild, text: str, color, critical: bool) -> discord.Embed:
+    m = _LOG_LEAD_EMOJI_RE.match(text)
+    lead_emoji = m.group(1) if m else "📋"
+    body = text[m.end():].strip() if m else text
     if critical:
-        title = "❤️⚽ VĂN MINH XẤU — XỬ LÝ NGHIÊM"
+        title = f"{lead_emoji} Cảnh báo nghiêm trọng"
         embed_color = discord.Color.red()
-        commentary = random.choice(_RED_CARD_LINES)
-        footer = "🎙️ Bình luận viên: Security Bot • Trọng tài chính"
+        tag = "🔴 CRITICAL"
     elif color in _WARNING_COLORS:
-        title = "🟧⚽ ĐIỂM VĂN MINH GIẢM — CẢNH BÁO"
+        title = f"{lead_emoji} Cảnh báo"
         embed_color = discord.Color.gold()
-        commentary = random.choice(_YELLOW_CARD_LINES)
-        footer = "🎙️ Bình luận viên: Security Bot • Trợ lý trọng tài"
+        tag = "🟡 WARNING"
     else:
-        title = "📋⚽ NHẬT KÝ TRẬN ĐẤU"
+        title = f"{lead_emoji} Nhật ký hệ thống"
         embed_color = color
-        commentary = "Diễn biến trận đấu vẫn đang được cập nhật..."
-        footer = "🛡️ Security Bot • Ban tổ chức"
-    embed = discord.Embed(title=title, color=embed_color, timestamp=discord.utils.utcnow())
-    embed.add_field(name="🎙️ Bình luận", value=commentary, inline=False)
-    embed.add_field(name="📋 Chi tiết pha bóng", value=text[:1024] or "—", inline=False)
-    embed.set_footer(text=f"{footer} • {guild.name}")
+        tag = "🔵 INFO"
+    embed = discord.Embed(title=title, description=body[:2048] or "—", color=embed_color, timestamp=discord.utils.utcnow())
+    bot_avatar = bot.user.display_avatar.url if bot.user else discord.utils.MISSING
+    embed.set_author(name="Security Bot  ✓  Verified Application", icon_url=bot_avatar)
+    embed.set_footer(text=f"{guild.name} • {tag}", icon_url=guild.icon.url if guild.icon else discord.utils.MISSING)
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     return embed
@@ -1033,10 +1031,15 @@ async def forward_violation_content(guild: discord.Guild, message: discord.Messa
         return
     embed = discord.Embed(
         title="🚨 Nội dung vi phạm bị xóa",
-        description=f"Lý do: **{reason_label}**\nNgười gửi: {message.author.mention}\nKênh gốc: {message.channel.mention if hasattr(message.channel, 'mention') else message.channel}",
+        description=f"**Lý do:** {reason_label}\n**Người gửi:** {message.author.mention}\n**Kênh gốc:** {message.channel.mention if hasattr(message.channel, 'mention') else message.channel}",
         color=discord.Color.dark_gold(),
         timestamp=discord.utils.utcnow(),
     )
+    bot_avatar = bot.user.display_avatar.url if bot.user else discord.utils.MISSING
+    embed.set_author(name="Security Bot  ✓  Verified Application", icon_url=bot_avatar)
+    embed.set_footer(text=f"{guild.name} • 🗑️ CONTENT REMOVED", icon_url=guild.icon.url if guild.icon else discord.utils.MISSING)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
     if message.content:
         embed.add_field(name="Nội dung gốc", value=message.content[:1024], inline=False)
     files = []
@@ -1057,7 +1060,11 @@ async def log(guild: discord.Guild, text: str, color=discord.Color.blurple(), *,
         wh = await get_log_webhook(s["log_webhook_url"])
         if wh:
             try:
-                await wh.send(embed=embed, username="Security Bot")
+                await wh.send(
+                    embed=embed,
+                    username="Security Bot ✓",
+                    avatar_url=bot.user.display_avatar.url if bot.user else discord.utils.MISSING,
+                )
                 sent = True
             except discord.HTTPException:
                 logger.exception("Gửi log qua webhook thất bại ở guild %s", guild.id)
@@ -1460,6 +1467,27 @@ async def on_member_join(member: discord.Member):
             discord.Color.blurple(),
         )
         return
+    # Đột phá: member mới bị timeout tạm thời để buộc đọc luật trước khi được chat.
+    # Hết thời gian, Discord tự động gỡ timeout -> member chat bình thường.
+    read_rules_seconds = s.get("read_rules_seconds", 0)
+    rules_channel_id = s.get("rules_channel_id")
+    if read_rules_seconds and read_rules_seconds > 0:
+        until = discord.utils.utcnow() + datetime.timedelta(seconds=read_rules_seconds)
+        await safe_action(
+            member.timeout(until, reason="Yêu cầu đọc luật server trước khi được chat"),
+            action_name="timeout new member to read rules",
+            guild_id=guild.id,
+        )
+        minutes = read_rules_seconds // 60
+        rules_mention = f"<#{rules_channel_id}>" if rules_channel_id else "kênh luật"
+        try:
+            await member.send(
+                f"👋 Chào mừng bạn đến **{guild.name}**!\n"
+                f"Vui lòng đọc luật tại {rules_mention} trong **{minutes} phút** tới. "
+                f"Sau {minutes} phút bạn sẽ được chat bình thường."
+            )
+        except discord.HTTPException:
+            pass
     now = time.time()
     joins = recent_joins[guild.id]
     joins.append(now)
@@ -1966,6 +1994,19 @@ async def on_message(message: discord.Message):
     if not is_other_bot and is_protected(member, guild_id):
         return
     s = cfg(guild_id)
+    # Đột phá: tin nhắn chứa từ khóa "llaudon" (không phân biệt hoa/thường) trong
+    # kênh xử lý vi phạm, gửi bởi người có role xử lý vi phạm -> không tính spam,
+    # vì đây là người đang thao tác công việc (xử lý vi phạm), không phải spam thật.
+    exempt_channel_id = s.get("spam_exempt_channel_id")
+    exempt_role_id = s.get("spam_exempt_role_id")
+    exempt_keyword = (s.get("spam_exempt_keyword") or "").lower()
+    spam_exempt = bool(
+        not is_other_bot
+        and exempt_keyword
+        and message.channel.id == exempt_channel_id
+        and any(r.id == exempt_role_id for r in getattr(member, "roles", []))
+        and exempt_keyword in (message.content or "").lower()
+    )
     if not is_other_bot:
         sig = looks_like_selfbot_signature(message.content)
         if sig:
@@ -2099,6 +2140,8 @@ async def on_message(message: discord.Message):
             score = add_suspicion(guild_id, member.id, "scam", s["suspicion_decay_seconds"])
             await apply_suspicion_consequence(message.guild, member, score, s)
             return
+    if spam_exempt:
+        return
     key = (guild_id, member.id)
     now = time.time()
     timeline = message_timeline[key]

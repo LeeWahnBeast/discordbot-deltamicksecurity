@@ -549,17 +549,46 @@ def _strip_non_alnum(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", "", text)
     text = re.sub(r"(.)\1+", r"\1", text)
     return text
+def _has_diacritics(token: str) -> bool:
+    """Token còn mang dấu tiếng Việt (nguyên âm có dấu thanh/dấu mũ/dấu móc) hay không."""
+    decomposed = unicodedata.normalize("NFD", token)
+    return any(unicodedata.category(c) == "Mn" for c in decomposed)
 def contains_badword(content: str, badwords: list[str]) -> str | None:
     base = normalize(content)
     spaced = _strip_non_alnum(base)
     squashed = re.sub(r"\s+", "", spaced)
+    # Token gốc (còn giữ dấu) — dùng riêng để kiểm tra các từ cấm ngắn có dấu,
+    # tránh đụng độ với từ tiếng Việt hợp lệ khác dấu (vd: "các" vs "cặc" cùng
+    # về "cac" sau khi bỏ hết dấu, nhưng là 2 từ hoàn toàn khác nghĩa).
+    raw_tokens = re.findall(
+        r"\w+", strip_invisible_chars(content).lower().translate(VN_MAP), flags=re.UNICODE
+    )
     for w in badwords:
         norm_word = normalize(w)
         norm_word = re.sub(r"[^a-z0-9]", "", norm_word)
         norm_word = re.sub(r"(.)\1+", r"\1", norm_word)
         if not norm_word:
             continue
-        if len(norm_word) < SHORT_WORD_BOUNDARY_LEN:
+        if len(norm_word) < SHORT_WORD_BOUNDARY_LEN and _has_diacritics(w):
+            # Từ cấm ngắn + có dấu tiếng Việt -> chỉ khớp khi:
+            # (a) người dùng gõ KHÔNG dấu (nghi né tránh bộ lọc), hoặc
+            # (b) người dùng gõ ĐÚNG y hệt dấu như từ cấm.
+            word_dedup = re.sub(r"(.)\1+", r"\1", w.lower())
+            matched = False
+            for tok in raw_tokens:
+                tok_loose = re.sub(r"[^a-z0-9]", "", normalize(tok))
+                tok_loose = re.sub(r"(.)\1+", r"\1", tok_loose)
+                if tok_loose != norm_word:
+                    continue
+                if not _has_diacritics(tok):
+                    matched = True
+                    break
+                if re.sub(r"(.)\1+", r"\1", tok) == word_dedup:
+                    matched = True
+                    break
+            if matched:
+                return w
+        elif len(norm_word) < SHORT_WORD_BOUNDARY_LEN:
             if re.search(rf"(?<![a-z0-9]){re.escape(norm_word)}(?![a-z0-9])", spaced):
                 return w
         else:
